@@ -542,6 +542,7 @@ const SessionModel = Schema.Struct({
 
 export const SessionInfo = Schema.Struct({
   id: SessionID,
+  purpose: optional(Schema.String),
   slug: Schema.String,
   projectID: Project.ID,
   workspaceID: optional(WorkspaceID),

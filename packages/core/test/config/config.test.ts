@@ -640,7 +640,7 @@ describe("Config", () => {
             expect(documents[0]?.info.compaction).toEqual({
               auto: true,
               prune: undefined,
-              keep: { tokens: 2000 },
+              keep: { tokens: 2000, turns: 3 },
               buffer: 10000,
             })
             expect(documents[0]?.info.mcp).toMatchObject({

@@ -56,6 +56,7 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
       prune: info.compaction.prune,
       keep: {
         tokens: info.compaction.preserve_recent_tokens,
+        turns: info.compaction.tail_turns,
       },
       buffer: info.compaction.reserved,
     },
@@ -119,6 +120,8 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
     hidden: info.hidden,
     color: info.color,
     steps: info.steps,
+    tools: info.tools_enabled,
+    workspaceInstructions: info.workspace_instructions,
     disabled: info.disable,
     permissions: permissions(info.permission),
   }

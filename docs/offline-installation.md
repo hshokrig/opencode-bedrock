@@ -1,6 +1,9 @@
 # Offline installation
 
 Build the artifact on Linux with public package access. The target SageMaker runtime does not need public access.
+The source build requires the repository-pinned Bun 1.3.14 toolchain, npm registry access for the
+locked dependency graph, and GitHub access for the locked `ghostty-web` source dependency. An
+approved, already compiled `OPENCODE_BIN` avoids all package and source downloads during packaging.
 
 ## Build
 
@@ -41,8 +44,23 @@ opencode-bedrock doctor
 
 The installer requires and verifies the outer checksum, rejects traversal, links, devices, and duplicate archive paths, verifies every file against the inner `SHA256SUMS`, and installs into a versioned directory. It refuses to replace a regular file in `~/.local/bin`.
 
+The target needs no `sudo`. Its local utilities are `bash`, Python 3.10+, `sha256sum`, `tar`,
+`gzip`, `realpath`, `awk`, `find`, `ln`, `mv`, and `bwrap`, plus ordinary system libraries and AWS
+role credentials. The artifact supplies OpenCode and the Python wrapper. No pip, npm, Bun, Git, or
+public registry is used on the target.
+
 ## Upgrade
 
-Build a new artifact from a reviewed upstream merge. Install it beside the old version, run `doctor`, then restart each service. The installer updates the `opencode`, `opencode-bedrock`, and `opencode-bedrock-verify-aws` symlinks. Keep the previous version until the SageMaker checks pass.
+Build a new artifact from a reviewed upstream merge. Before first start, back up the private XDG
+state directory. Install it beside the old version, run `doctor`, then restart each service. The
+installer updates the `opencode`, `opencode-bedrock`, and `opencode-bedrock-verify-aws` symlinks.
+Keep the previous version until the SageMaker checks pass.
 
-Runtime auto-update, model-catalog downloads, repository plugins, external skills, and LSP downloads are disabled. A task can still run a package manager after explicit shell approval if the sandbox contains the command, but it will fail without an approved package source.
+Database and durable-event upgrades are one-way unless a release explicitly documents otherwise.
+After a new binary has opened and migrated a state directory, switching only the executable back
+is not a supported rollback. Restore the matching pre-upgrade state backup together with the old
+binary.
+
+Runtime auto-update, model-catalog downloads, repository plugins, external skills, and LSP
+downloads are disabled. In terminal-chat mode no tools are exposed, so the only non-loopback
+network calls are AWS credential resolution and the configured Amazon Bedrock endpoint.

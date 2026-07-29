@@ -637,7 +637,7 @@ describe("session HttpApi", () => {
   )
 
   it.instance(
-    "returns v2 public unavailable errors for unfinished session mutations",
+    "serves explicit v2 compaction and passive wait",
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -645,20 +645,41 @@ describe("session HttpApi", () => {
         const session = yield* createSession({ title: "v2 unavailable" })
 
         const compact = yield* request(`/api/session/${session.id}/compact`, { method: "POST", headers })
-        expect(compact.status).toBe(503)
-        expect(yield* responseJson(compact)).toEqual({
-          _tag: "ServiceUnavailableError",
-          message: "Session compact is not available yet",
-          service: "session.compact",
-        })
+        expect(compact.status).toBe(204)
 
         const wait = yield* request(`/api/session/${session.id}/wait`, { method: "POST", headers })
-        expect(wait.status).toBe(503)
-        expect(yield* responseJson(wait)).toEqual({
-          _tag: "ServiceUnavailableError",
-          message: "Session wait is not available yet",
-          service: "session.wait",
+        expect(wait.status).toBe(204)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "serves guarded v2 title compare-and-set routes",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const session = yield* createSession({ title: "New session - test" })
+
+        const restricted = yield* request(`/api/session/${session.id}/title/ensure`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ firstMessageID: "msg_missing" }),
         })
+        expect(restricted.status).toBe(503)
+
+        const updated = yield* requestJson<{ data: { updated: boolean } }>(`/api/session/${session.id}/title`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ expected: "New session - test", title: "Stored title" }),
+        })
+        expect(updated.data.updated).toBe(true)
+        const stale = yield* requestJson<{ data: { updated: boolean } }>(`/api/session/${session.id}/title`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ expected: "New session - test", title: "Wrong title" }),
+        })
+        expect(stale.data.updated).toBe(false)
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )

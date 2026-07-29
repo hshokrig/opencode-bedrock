@@ -44,9 +44,22 @@ def opencode_config(
         "opus": {
             "id": inference_profile,
             "name": "Claude Opus through Amazon Bedrock",
+            "limit": {"context": 200_000, "input": 200_000, "output": 20_000},
         }
     }
     agents: dict[str, dict[str, Any]] = {
+        "chat": {
+            "mode": "primary",
+            "description": "A private conversational assistant without workspace tools.",
+            "model": "amazon-bedrock/opus",
+            "prompt": (
+                "You are a concise, thoughtful conversational assistant. Answer the user "
+                "directly. You have no tools and must not claim to inspect or change files."
+            ),
+            "tools_enabled": False,
+            "workspace_instructions": False,
+            "permission": {"*": "deny", "external_directory": "deny"},
+        },
         "implement": {
             "mode": "subagent",
             "description": "Make one focused, authorized change inside the active workspace.",
@@ -97,6 +110,7 @@ def opencode_config(
         models[alias] = {
             "id": profile,
             "name": f"{name} agent through Amazon Bedrock",
+            "limit": {"context": 200_000, "input": 200_000, "output": 20_000},
         }
         agents.setdefault(name, {})["model"] = f"amazon-bedrock/{alias}"
 
@@ -106,8 +120,15 @@ def opencode_config(
         "share": "disabled",
         "model": "amazon-bedrock/opus",
         "default_agent": "build",
+        "compaction": {
+            "auto": True,
+            "tail_turns": 10,
+            "preserve_recent_tokens": 40_000,
+            "reserved": 20_000,
+        },
         "provider": {
             "amazon-bedrock": {
+                "npm": "@ai-sdk/amazon-bedrock",
                 "options": options,
                 "models": models,
             }

@@ -73,6 +73,17 @@ export const ModelSwitched = Event.define({
 })
 export type ModelSwitched = typeof ModelSwitched.Type
 
+export const TitleUpdated = Event.define({
+  type: "session.next.title.updated",
+  ...options,
+  schema: {
+    ...Base,
+    expected: Schema.String,
+    title: Schema.String,
+  },
+})
+export type TitleUpdated = typeof TitleUpdated.Type
+
 export const Moved = Event.define({
   type: "session.next.moved",
   ...options,
@@ -97,6 +108,32 @@ export const PromptAdmitted = Event.define({
   schema: PromptFields,
 })
 export type PromptAdmitted = typeof PromptAdmitted.Type
+
+export const ProviderAttemptStarted = Event.define({
+  type: "session.next.provider-attempt.started",
+  ...options,
+  schema: {
+    ...Base,
+    attemptID: Schema.String,
+    inputMessageIDs: Schema.Array(SessionMessage.ID),
+  },
+})
+export type ProviderAttemptStarted = typeof ProviderAttemptStarted.Type
+
+export const ProviderAttemptEnded = Event.define({
+  type: "session.next.provider-attempt.ended",
+  ...options,
+  schema: {
+    ...Base,
+    attemptID: Schema.String,
+    outcome: Schema.Union([
+      Schema.Literal("completed"),
+      Schema.Literal("failed"),
+      Schema.Literal("interrupted"),
+    ]),
+  },
+})
+export type ProviderAttemptEnded = typeof ProviderAttemptEnded.Type
 
 export const ContextUpdated = Event.define({
   type: "session.next.context.updated",
@@ -429,6 +466,22 @@ export namespace Compaction {
     },
   })
   export type Ended = typeof Ended.Type
+
+  export const Failed = Event.define({
+    type: "session.next.compaction.failed",
+    ...options,
+    schema: {
+      ...Base,
+      messageID: SessionMessage.ID,
+      reason: Started.data.fields.reason,
+      failure: Schema.Union([
+        Schema.Literal("provider-error"),
+        Schema.Literal("empty-summary"),
+        Schema.Literal("interrupted"),
+      ]),
+    },
+  })
+  export type Failed = typeof Failed.Type
 }
 
 export namespace RevertEvent {
@@ -448,9 +501,12 @@ export namespace RevertEvent {
 export const DurableDefinitions = Event.inventory(
   AgentSwitched,
   ModelSwitched,
+  TitleUpdated,
   Moved,
   Prompted,
   PromptAdmitted,
+  ProviderAttemptStarted,
+  ProviderAttemptEnded,
   ContextUpdated,
   Synthetic,
   Shell.Started,
@@ -471,6 +527,7 @@ export const DurableDefinitions = Event.inventory(
   Retried,
   Compaction.Started,
   Compaction.Ended,
+  Compaction.Failed,
   RevertEvent.Staged,
   RevertEvent.Cleared,
   RevertEvent.Committed,
@@ -479,9 +536,12 @@ export const DurableDefinitions = Event.inventory(
 export const Definitions = Event.inventory(
   AgentSwitched,
   ModelSwitched,
+  TitleUpdated,
   Moved,
   Prompted,
   PromptAdmitted,
+  ProviderAttemptStarted,
+  ProviderAttemptEnded,
   ContextUpdated,
   Synthetic,
   Shell.Started,
@@ -506,6 +566,7 @@ export const Definitions = Event.inventory(
   Compaction.Started,
   Compaction.Delta,
   Compaction.Ended,
+  Compaction.Failed,
   RevertEvent.Staged,
   RevertEvent.Cleared,
   RevertEvent.Committed,

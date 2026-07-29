@@ -247,6 +247,67 @@ describe("SessionRunnerModel", () => {
     }),
   )
 
+  it.effect("maps Bedrock models to native Converse with role credentials and exact model IDs", () =>
+    Effect.gen(function* () {
+      const profiles: Array<string | undefined> = []
+      const resolved = yield* SessionRunnerModel.fromCatalogModel(
+        ModelV2.Info.make({
+          ...model({
+            type: "aisdk",
+            package: "@ai-sdk/amazon-bedrock",
+            settings: {
+              region: "eu-north-1",
+              profile: "sagemaker-role",
+              endpoint: "https://bedrock-runtime.vpce.example",
+            },
+          }),
+          api: {
+            id: ModelV2.ID.make("approved-inference-profile"),
+            type: "aisdk",
+            package: "@ai-sdk/amazon-bedrock",
+            settings: {
+              region: "eu-north-1",
+              profile: "sagemaker-role",
+              endpoint: "https://bedrock-runtime.vpce.example",
+            },
+          },
+          request: { headers: { "x-test": "header" }, body: {} },
+        }),
+        undefined,
+        async (profile) => {
+          profiles.push(profile)
+          return {
+            accessKeyId: "access",
+            secretAccessKey: "secret",
+            sessionToken: "session",
+          }
+        },
+      )
+      const request = LLM.request({ model: resolved, prompt: "Hello" })
+      const headers = yield* resolved.route.auth.apply({
+        request,
+        method: "POST",
+        url: "https://bedrock-runtime.vpce.example/model/example/converse-stream",
+        body: "{}",
+        headers: Headers.empty,
+      })
+
+      expect(profiles).toEqual(["sagemaker-role"])
+      expect(String(resolved.id)).toBe("approved-inference-profile")
+      expect(resolved.route).toMatchObject({
+        id: "bedrock-converse",
+        endpoint: { baseURL: "https://bedrock-runtime.vpce.example" },
+        defaults: {
+          headers: { "x-test": "header" },
+          limits: { context: 100, output: 20 },
+          http: { body: {} },
+        },
+      })
+      expect(headers.authorization).toStartWith("AWS4-HMAC-SHA256 ")
+      expect(headers["x-amz-security-token"]).toBe("session")
+    }),
+  )
+
   it.effect("uses resolved credentials for bearer auth", () =>
     Effect.gen(function* () {
       const resolved = yield* SessionRunnerModel.fromCatalogModel(
@@ -341,6 +402,9 @@ describe("SessionRunnerModel", () => {
           model({ type: "aisdk", package: "@ai-sdk/google", url: "https://google.example/v1" }),
         ),
       ).toBe(false)
+      expect(
+        SessionRunnerModel.supported(model({ type: "aisdk", package: "@ai-sdk/amazon-bedrock" })),
+      ).toBe(true)
       expect(SessionRunnerModel.supported(model({ type: "native", settings: {} }))).toBe(false)
     }),
   )

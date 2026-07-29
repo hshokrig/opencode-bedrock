@@ -8,6 +8,10 @@ import type {
   SessionsListOutput,
   SessionsCreateInput,
   SessionsCreateOutput,
+  SessionsCompareAndSetTitleInput,
+  SessionsCompareAndSetTitleOutput,
+  SessionsEnsureTitleInput,
+  SessionsEnsureTitleOutput,
   SessionsActiveOutput,
   SessionsGetInput,
   SessionsGetOutput,
@@ -290,6 +294,7 @@ export function make(options: ClientOptions) {
             path: `/api/session`,
             query: {
               workspace: input?.["workspace"],
+              purpose: input?.["purpose"],
               limit: input?.["limit"],
               order: input?.["order"],
               search: input?.["search"],
@@ -311,12 +316,37 @@ export function make(options: ClientOptions) {
             path: `/api/session`,
             body: {
               id: input?.["id"],
+              purpose: input?.["purpose"],
               agent: input?.["agent"],
               model: input?.["model"],
               location: input?.["location"],
             },
             successStatus: 200,
-            declaredStatuses: [401, 400],
+            declaredStatuses: [409, 401, 400],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      compareAndSetTitle: (input: SessionsCompareAndSetTitleInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: SessionsCompareAndSetTitleOutput }>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/title`,
+            body: { expected: input["expected"], title: input["title"] },
+            successStatus: 200,
+            declaredStatuses: [404, 400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
+      ensureTitle: (input: SessionsEnsureTitleInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: SessionsEnsureTitleOutput }>(
+          {
+            method: "POST",
+            path: `/api/session/${encodeURIComponent(input.sessionID)}/title/ensure`,
+            body: { firstMessageID: input["firstMessageID"] },
+            successStatus: 200,
+            declaredStatuses: [404, 503, 400, 401],
             empty: false,
           },
           requestOptions,

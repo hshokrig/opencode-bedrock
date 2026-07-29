@@ -12,6 +12,7 @@ import {
   UnknownError,
 } from "@opencode-ai/protocol/errors"
 import { AbsolutePath } from "@opencode-ai/core/schema"
+import { SessionTitle } from "@opencode-ai/core/session/title"
 
 const DefaultSessionsLimit = 50
 const DefaultSessionHistoryLimit = 50
@@ -70,11 +71,145 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
           return {
             data: yield* session.create({
               id: ctx.payload.id,
+              purpose: ctx.payload.purpose,
               agent: ctx.payload.agent,
               model: ctx.payload.model,
               location: ctx.payload.location ?? { directory: AbsolutePath.make(process.cwd()) },
-            }),
+            }).pipe(
+              Effect.catchTag(
+                "Session.CreateConflictError",
+                (error) =>
+                  new ConflictError({
+                    message: `Session ID already exists with different immutable creation parameters: ${error.sessionID}`,
+                    resource: error.sessionID,
+                  }),
+              ),
+            ),
           }
+        }),
+      )
+      .handle(
+        "session.compareAndSetTitle",
+        Effect.fn(function* (ctx) {
+          return {
+            data: {
+              updated: yield* session
+                .compareAndSetTitle({
+                  sessionID: ctx.params.sessionID,
+                  expected: ctx.payload.expected,
+                  title: ctx.payload.title,
+                })
+                .pipe(
+                  Effect.catchTag(
+                    "Session.NotFoundError",
+                    (error) =>
+                      new SessionNotFoundError({
+                        sessionID: error.sessionID,
+                        message: `Session not found: ${error.sessionID}`,
+                      }),
+                  ),
+                ),
+            },
+          }
+        }),
+      )
+      .handle(
+        "session.ensureTitle",
+        Effect.fn(function* (ctx) {
+          const info = yield* session.get(ctx.params.sessionID).pipe(
+            Effect.catchTag(
+              "Session.NotFoundError",
+              (error) =>
+                new SessionNotFoundError({
+                  sessionID: error.sessionID,
+                  message: `Session not found: ${error.sessionID}`,
+                }),
+            ),
+          )
+          if (!info.title.startsWith("New session - ")) return { data: { title: info.title } }
+          if (info.purpose !== "terminal-chat" || info.model?.providerID !== "amazon-bedrock")
+            return yield* new ServiceUnavailableError({
+              message: "Automatic title generation is restricted to terminal Bedrock chats",
+              service: "session.title",
+            })
+          const messages = yield* session
+            .messages({
+              sessionID: info.id,
+              order: "asc",
+              limit: 100,
+            })
+            .pipe(
+              Effect.mapError(
+                () =>
+                  new ServiceUnavailableError({
+                    message: "The first chat exchange could not be read",
+                    service: "session.title",
+                  }),
+              ),
+            )
+          const userIndex = messages.findIndex(
+            (message) => message.type === "user" && message.id === ctx.payload.firstMessageID,
+          )
+          const user = userIndex < 0 ? undefined : messages[userIndex]
+          const following = messages.slice(userIndex + 1)
+          const nextUser = following.findIndex((message) => message.type === "user")
+          const assistant = following
+            .slice(0, nextUser < 0 ? undefined : nextUser)
+            .find(
+              (message) =>
+                message.type === "assistant" &&
+                message.error === undefined &&
+                message.finish !== "error" &&
+                message.time.completed !== undefined,
+            )
+          if (user?.type !== "user" || assistant?.type !== "assistant")
+            return yield* new ServiceUnavailableError({
+              message: "The first chat exchange has not settled",
+              service: "session.title",
+            })
+          const title = yield* SessionTitle.Service.pipe(
+            Effect.flatMap((titles) =>
+              titles.generate({
+                session: info,
+                user: user.text,
+                assistant: assistant.content
+                  .flatMap((part) => (part.type === "text" ? [part.text] : []))
+                  .join(""),
+              }),
+            ),
+            Effect.mapError(
+              () =>
+                new ServiceUnavailableError({
+                  message: "The Bedrock title model is unavailable",
+                  service: "session.title",
+                }),
+            ),
+          )
+          yield* session
+            .compareAndSetTitle({
+              sessionID: info.id,
+              expected: info.title,
+              title,
+            })
+            .pipe(
+              Effect.mapError(
+                (error) =>
+                  new SessionNotFoundError({
+                    sessionID: error.sessionID,
+                    message: `Session not found: ${error.sessionID}`,
+                  }),
+              ),
+            )
+          const stored = yield* session.get(info.id).pipe(
+            Effect.mapError(
+              (error) =>
+                new SessionNotFoundError({
+                  sessionID: error.sessionID,
+                  message: `Session not found: ${error.sessionID}`,
+                }),
+            ),
+          )
+          return { data: { title: stored.title } }
         }),
       )
       .handle(

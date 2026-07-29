@@ -23,6 +23,8 @@ export interface Interface {
     readonly sessionID: SessionSchema.ID
     readonly force: boolean
   }) => Effect.Effect<void, RunError>
+  /** Performs one explicit compaction without starting a visible provider turn. */
+  readonly compact: (sessionID: SessionSchema.ID) => Effect.Effect<void, RunError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/SessionRunner") {}

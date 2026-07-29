@@ -40,6 +40,8 @@ const execution = Layer.succeed(
       Effect.sync(() => {
         wakeCalls.push(sessionID)
       }),
+    awaitIdle: () => Effect.void,
+    compact: () => Effect.void,
   }),
 )
 const it = testEffect(

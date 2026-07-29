@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -48,8 +49,15 @@ class PackagingTests(unittest.TestCase):
             )
 
             with tarfile.open(archive) as bundle:
+                names = bundle.getnames()
+                self.assertTrue(
+                    any(name.endswith("/bin/opencode_bedrock/chat.py") for name in names)
+                )
+                self.assertTrue(
+                    any(name.endswith("/share/docs/terminal-chat.md") for name in names)
+                )
                 manifest_name = next(
-                    name for name in bundle.getnames() if name.endswith("/manifest.json")
+                    name for name in names if name.endswith("/manifest.json")
                 )
                 manifest_file = bundle.extractfile(manifest_name)
                 self.assertIsNotNone(manifest_file)
@@ -59,6 +67,23 @@ class PackagingTests(unittest.TestCase):
                 manifest["upstream_commit"],
                 "7565e03536d19e850f9996c407f9bf5e932b5f7a",
             )
+            second_output = root / "artifacts-second"
+            second_build = subprocess.run(
+                [str(repo / "scripts" / "build-offline.sh"), str(second_output)],
+                cwd=repo,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(second_build.returncode, 0, second_build.stderr)
+            second_archive = Path(second_build.stdout.strip().splitlines()[-1])
+            self.assertEqual(archive.read_bytes(), second_archive.read_bytes())
+
+            with (repo / "pyproject.toml").open("rb") as handle:
+                project = tomllib.load(handle)["project"]
+            self.assertEqual(project.get("dependencies", []), [])
 
             prefix = root / "installed"
             install = subprocess.run(
@@ -81,6 +106,15 @@ class PackagingTests(unittest.TestCase):
             )
             self.assertEqual(version.returncode, 0, version.stderr)
             self.assertEqual(version.stdout.strip(), "0.1.0")
+            chat_help = subprocess.run(
+                [str(wrapper), "chat", "--help"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(chat_help.returncode, 0, chat_help.stderr)
+            self.assertIn("--no-stream", chat_help.stdout)
             self.assertTrue(
                 (prefix / "0.1.0" / "share" / "policies" / "sagemaker-bedrock-iam.json").is_file()
             )

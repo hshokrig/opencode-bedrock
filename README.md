@@ -62,6 +62,17 @@ opencode-bedrock attach --project my-project
 opencode-bedrock stop --project my-project
 ```
 
+For a focused, tool-free Claude conversation with durable history:
+
+```bash
+opencode-bedrock chat --project my-project
+```
+
+The terminal chat resumes its last selected Session, streams best-effort text, retains the full
+transcript, and compacts active context near the 200,000-token policy ceiling. See
+[Terminal chat](docs/terminal-chat.md) for commands, history behavior, call counts, offline
+dependencies, and power-loss handling.
+
 Use `--workspace /absolute/path` instead of `--project` for an unregistered repository. Non-Git directories require `--allow-non-git` on `start`.
 
 ## Safety boundaries

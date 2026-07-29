@@ -39,6 +39,8 @@ const agentKeys = new Set([
   "hidden",
   "color",
   "steps",
+  "tools",
+  "workspaceInstructions",
   "disabled",
   "permissions",
 ])
@@ -105,6 +107,9 @@ export const Plugin = define({
               if (item.hidden !== undefined) agent.hidden = item.hidden
               if (item.color !== undefined) agent.color = item.color
               if (item.steps !== undefined) agent.steps = item.steps
+              if (item.tools !== undefined) Object.assign(agent, { tools: item.tools })
+              if (item.workspaceInstructions !== undefined)
+                Object.assign(agent, { workspaceInstructions: item.workspaceInstructions })
               if (item.permissions !== undefined) {
                 agent.permissions.push(...expandPermissions(item.permissions, global.home))
               }

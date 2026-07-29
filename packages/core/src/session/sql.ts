@@ -23,6 +23,7 @@ export const SessionTable = sqliteTable(
   "session",
   {
     id: text().$type<SessionSchema.ID>().primaryKey(),
+    purpose: text().$type<SessionSchema.Purpose>(),
     project_id: text()
       .$type<ProjectV2.ID>()
       .notNull()
@@ -62,6 +63,7 @@ export const SessionTable = sqliteTable(
     index("session_project_idx").on(table.project_id),
     index("session_workspace_idx").on(table.workspace_id),
     index("session_parent_idx").on(table.parent_id),
+    index("session_purpose_idx").on(table.purpose),
   ],
 )
 

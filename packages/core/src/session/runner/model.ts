@@ -3,6 +3,7 @@ export * as SessionRunnerModel from "./model"
 import { makeLocationNode } from "../../effect/app-node"
 import { type Model } from "@opencode-ai/llm"
 import * as AnthropicMessages from "@opencode-ai/llm/protocols/anthropic-messages"
+import * as BedrockConverse from "@opencode-ai/llm/protocols/bedrock-converse"
 import * as OpenAICompatibleChat from "@opencode-ai/llm/protocols/openai-compatible-chat"
 import * as OpenAIResponses from "@opencode-ai/llm/protocols/openai-responses"
 import { Auth, type AnyRoute } from "@opencode-ai/llm/route"
@@ -131,7 +132,11 @@ const apiName = (model: ModelV2.Info) =>
 export const fromCatalogModel = (
   model: ModelV2.Info,
   credential?: Credential.Value,
-): Effect.Effect<Model, UnsupportedApiError> => {
+  loadBedrockCredentials = async (profile?: string) => {
+    const { fromNodeProviderChain } = await import("@aws-sdk/credential-providers")
+    return fromNodeProviderChain(profile ? { profile } : {})()
+  },
+): Effect.Effect<Model, UnsupportedApiError | Integration.AuthorizationError> => {
   const resolved =
     credential?.type !== "key" || credential.metadata === undefined
       ? model
@@ -151,6 +156,44 @@ export const fromCatalogModel = (
       withDefaults(resolved, AnthropicMessages.route)
         .with({ auth: key === undefined ? Auth.none : Auth.header("x-api-key", key) })
         .model({ id: resolved.api.id }),
+    )
+  }
+  if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/amazon-bedrock") {
+    const region =
+      (typeof resolved.api.settings?.region === "string" ? resolved.api.settings.region : undefined) ??
+      process.env.AWS_REGION ??
+      process.env.AWS_DEFAULT_REGION ??
+      "us-east-1"
+    const endpoint =
+      resolved.api.url ??
+      (typeof resolved.api.settings?.endpoint === "string" ? resolved.api.settings.endpoint : undefined) ??
+      `https://bedrock-runtime.${region}.amazonaws.com`
+    const bearer =
+      process.env.AWS_BEARER_TOKEN_BEDROCK ??
+      (typeof resolved.api.settings?.bearerToken === "string" ? resolved.api.settings.bearerToken : undefined)
+    const route = withDefaults(resolved, BedrockConverse.route).with({
+      endpoint: { baseURL: endpoint },
+      auth: bearer === undefined ? BedrockConverse.sigV4Auth(undefined) : Auth.bearer(Auth.value(bearer)),
+    })
+    if (bearer !== undefined) return Effect.succeed(route.model({ id: resolved.api.id }))
+    const profile =
+      typeof resolved.api.settings?.profile === "string" ? resolved.api.settings.profile : process.env.AWS_PROFILE
+    return Effect.tryPromise({
+      try: () => loadBedrockCredentials(profile),
+      catch: (cause) => new Integration.AuthorizationError({ cause }),
+    }).pipe(
+      Effect.map((credentials) =>
+        route
+          .with({
+            auth: BedrockConverse.sigV4Auth({
+              region,
+              accessKeyId: credentials.accessKeyId,
+              secretAccessKey: credentials.secretAccessKey,
+              sessionToken: credentials.sessionToken,
+            }),
+          })
+          .model({ id: resolved.api.id }),
+      ),
     )
   }
   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/openai-compatible" && resolved.api.url) {
@@ -176,6 +219,7 @@ export const supported = (model: ModelV2.Info) =>
   model.api.type === "aisdk" &&
   (model.api.package === "@ai-sdk/openai" ||
     model.api.package === "@ai-sdk/anthropic" ||
+    model.api.package === "@ai-sdk/amazon-bedrock" ||
     (model.api.package === "@ai-sdk/openai-compatible" && model.api.url !== undefined))
 
 /** Resolves models from the catalog belonging to the current Location runtime. */

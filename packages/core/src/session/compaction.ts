@@ -11,6 +11,7 @@ import { Token } from "../util/token"
 
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_KEEP_TOKENS = 8_000
+const DEFAULT_KEEP_TURNS = 2
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 const SUMMARY_OUTPUT_TOKENS = 4_096
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
@@ -54,6 +55,7 @@ type Settings = {
   readonly auto: boolean
   readonly buffer: number
   readonly tokens: number
+  readonly turns: number
 }
 
 type Dependencies = {
@@ -69,7 +71,10 @@ type Input = {
   readonly entries: readonly Entry[]
   readonly model: Model
   readonly request: LLMRequest
+  readonly reason?: "auto" | "manual"
 }
+
+export type Result = "not-needed" | "compacted" | "failed" | "cannot-fit"
 
 const estimate = (value: unknown) => Token.estimate(JSON.stringify(value))
 
@@ -120,41 +125,89 @@ const settings = (documents: readonly Config.Entry[]) => {
       auto: current.auto ?? result.auto,
       buffer: current.buffer ?? result.buffer,
       tokens: current.keep?.tokens ?? result.tokens,
+      turns: current.keep?.turns ?? result.turns,
     }),
-    { auto: true, buffer: DEFAULT_BUFFER, tokens: DEFAULT_KEEP_TOKENS },
+    { auto: true, buffer: DEFAULT_BUFFER, tokens: DEFAULT_KEEP_TOKENS, turns: DEFAULT_KEEP_TURNS },
   )
 }
 
 const select = (
   entries: readonly Entry[],
   tokens: number,
+  turns: number,
 ): { readonly head: string; readonly recent: string } | undefined => {
   const conversation = entries
     .filter((entry) => entry.message.type !== "compaction")
-    .map((entry) => serialize(entry.message))
-    .filter(Boolean)
+    .map((entry) => ({ message: entry.message, text: serialize(entry.message) }))
+    .filter((entry) => entry.text.length > 0)
   if (conversation.length === 0) return
-  let total = 0
-  let split = conversation.length
-  let splitPrefix = ""
-  let splitSuffix = ""
-  for (let index = conversation.length - 1; index >= 0; index--) {
-    const next = total + Token.estimate(conversation[index])
-    if (next > tokens) {
-      const remaining = Math.max(0, tokens - total) * 4
-      if (remaining > 0) {
-        splitPrefix = conversation[index].slice(0, -remaining)
-        splitSuffix = conversation[index].slice(-remaining)
-        split = index + 1
+
+  const groups = conversation.reduce<
+    Array<{ readonly text: string[]; hasUser: boolean; settled: boolean; complete: boolean }>
+  >(
+    (result, entry) => {
+      const current = result.at(-1)
+      if (entry.message.type === "user") {
+        if (current && current.hasUser && !current.settled) {
+          current.text.push(entry.text)
+          return result
+        }
+        result.push({ text: [entry.text], hasUser: true, settled: false, complete: false })
+        return result
       }
-      break
+      if (current?.complete && entry.message.type === "assistant") {
+        current.text.push(entry.text)
+        return result
+      }
+      if (!current || current.settled) {
+        result.push({ text: [entry.text], hasUser: false, settled: true, complete: false })
+        return result
+      }
+      current.text.push(entry.text)
+      if (
+        entry.message.type === "assistant" &&
+        (entry.message.time.completed !== undefined ||
+          entry.message.finish !== undefined ||
+          entry.message.error !== undefined)
+      ) {
+        current.settled = true
+        current.complete =
+          current.hasUser &&
+          entry.message.error === undefined &&
+          entry.message.finish !== "error" &&
+          entry.message.time.completed !== undefined
+      }
+      return result
+    },
+    [],
+  )
+  const retained = new Set<number>()
+  let total = 0
+  let count = 0
+  for (let index = groups.length - 1; index >= 0; index--) {
+    const group = groups[index]
+    if (!group.settled) {
+      retained.add(index)
+      total += Token.estimate(group.text.join("\n\n"))
+      continue
     }
+    if (!group.complete) continue
+    if (count >= turns) continue
+    const next = total + Token.estimate(group.text.join("\n\n"))
+    if (next > tokens && (count > 0 || total > 0)) continue
+    retained.add(index)
     total = next
-    split = index
+    count += 1
   }
   return {
-    head: [...conversation.slice(0, split), splitPrefix].filter(Boolean).join("\n\n"),
-    recent: [splitSuffix, ...conversation.slice(split)].filter(Boolean).join("\n\n"),
+    head: groups
+      .filter((_, index) => !retained.has(index))
+      .flatMap((group) => group.text)
+      .join("\n\n"),
+    recent: groups
+      .filter((_, index) => retained.has(index))
+      .flatMap((group) => group.text)
+      .join("\n\n"),
   }
 }
 
@@ -171,27 +224,39 @@ export const make = (dependencies: Dependencies) => {
   const config = settings(dependencies.config)
   const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (input: Input) {
     const context = input.model.route.defaults.limits?.context
-    if (context === undefined || context <= 0) return false
+    if (context === undefined || context <= 0) return "cannot-fit" as const
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
-    const selected = select(input.entries, config.tokens)
+    const selected = select(input.entries, config.tokens, config.turns)
     const previousSummary = input.entries.find((entry) => entry.message.type === "compaction")?.message
-    if (!selected || (selected.head.length === 0 && previousSummary?.type !== "compaction")) return false
+    if (!selected || (selected.head.length === 0 && previousSummary?.type !== "compaction"))
+      return "cannot-fit" as const
     const summaryPrompt = buildPrompt({
       previousSummary: previousSummary?.type === "compaction" ? previousSummary.summary : undefined,
       context: [previousSummary?.type === "compaction" ? previousSummary.recent : "", selected.head].filter(Boolean),
     })
     const summaryOutput = Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS)
-    if (Token.estimate(summaryPrompt) > context - summaryOutput) return false
+    if (Token.estimate(summaryPrompt) > context - summaryOutput) return "cannot-fit" as const
     const messageID = SessionMessage.ID.create()
     yield* dependencies.events.publish(SessionEvent.Compaction.Started, {
       sessionID: input.sessionID,
       messageID,
       timestamp: yield* DateTime.now,
-      reason: "auto",
+      reason: input.reason ?? "auto",
     })
 
     const chunks: string[] = []
     let failed = false
+    const publishFailure = Effect.fnUntraced(function* (
+      failure: "provider-error" | "empty-summary" | "interrupted",
+    ) {
+      yield* dependencies.events.publish(SessionEvent.Compaction.Failed, {
+        sessionID: input.sessionID,
+        messageID,
+        timestamp: yield* DateTime.now,
+        reason: input.reason ?? "auto",
+        failure,
+      })
+    })
     const summarized = yield* dependencies.llm
       .stream(
         LLM.request({
@@ -209,29 +274,51 @@ export const make = (dependencies: Dependencies) => {
         }),
         Effect.as(true),
         Effect.catchTag("LLM.Error", () => Effect.succeed(false)),
+        Effect.onInterrupt(() => publishFailure("interrupted")),
       )
     const summary = chunks.join("")
-    if (!summarized || failed || !summary.trim()) return false
+    if (!summarized || failed) {
+      yield* publishFailure("provider-error")
+      return "failed" as const
+    }
+    if (!summary.trim()) {
+      yield* publishFailure("empty-summary")
+      return "failed" as const
+    }
     yield* dependencies.events.publish(SessionEvent.Compaction.Ended, {
       sessionID: input.sessionID,
       messageID,
       timestamp: yield* DateTime.now,
-      reason: "auto",
+      reason: input.reason ?? "auto",
       text: summary,
       recent: selected.recent,
     })
-    return true
+    return "compacted" as const
   })
   const compactIfNeeded = Effect.fn("SessionCompaction.compactIfNeeded")(function* (input: Input) {
-    if (!config.auto) return false
+    if (!config.auto) return "not-needed" as const
     const context = input.model.route.defaults.limits?.context
-    if (context === undefined || context <= 0) return false
+    if (context === undefined || context <= 0) return "not-needed" as const
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
     if (
       estimate({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }) <=
       context - Math.max(output, config.buffer)
     )
-      return false
+      return "not-needed" as const
+    const latestCompaction = input.entries.findLastIndex((entry) => entry.message.type === "compaction")
+    if (
+      latestCompaction >= 0 &&
+      !input.entries.slice(latestCompaction + 1).some(
+        (entry) =>
+          entry.message.type === "assistant" &&
+          entry.message.error === undefined &&
+          entry.message.finish !== "error" &&
+          entry.message.time.completed !== undefined,
+      )
+    )
+      return "not-needed" as const
+    const selected = select(input.entries, config.tokens, config.turns)
+    if (selected?.head.length === 0) return "not-needed" as const
     return yield* compactAfterOverflow(input)
   })
   return {

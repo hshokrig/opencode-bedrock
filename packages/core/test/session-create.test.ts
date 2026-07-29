@@ -93,6 +93,40 @@ describe("SessionV2.create", () => {
     }),
   )
 
+  it.effect("persists and filters immutable Session purpose and adopts mutable-state retries", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const purpose = SessionV2.Purpose.make("terminal-chat")
+      const created = yield* session.create({
+        id,
+        purpose,
+        location,
+        agent: AgentV2.ID.make("chat"),
+      })
+      yield* session.create({ location })
+
+      expect(created).toMatchObject({ purpose, agent: "chat" })
+      expect(yield* session.list({ purpose })).toEqual([created])
+      expect(
+        yield* session.create({
+          id,
+          purpose,
+          location,
+          agent: AgentV2.ID.make("build"),
+        }),
+      ).toEqual(created)
+      expect(
+        yield* session
+          .create({
+            id,
+            purpose: SessionV2.Purpose.make("other"),
+            location,
+          })
+          .pipe(Effect.flip),
+      ).toMatchObject({ _tag: "Session.CreateConflictError", sessionID: id })
+    }),
+  )
+
   it.effect("returns the existing Session when one ID is reused with different create arguments", () =>
     Effect.gen(function* () {
       const session = yield* SessionV2.Service
@@ -333,6 +367,29 @@ describe("SessionV2.create", () => {
       expect(
         Array.from(yield* session.events({ sessionID: created.id }).pipe(Stream.take(1), Stream.runCollect)),
       ).toMatchObject([{ type: "session.next.agent.switched", data: { agent: "plan" } }])
+    }),
+  )
+
+  it.effect("compare-and-sets the title through a durable Session event", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const created = yield* session.create({ location })
+
+      expect(
+        yield* session.compareAndSetTitle({
+          sessionID: created.id,
+          expected: "wrong",
+          title: "Ignored",
+        }),
+      ).toBe(false)
+      expect(
+        yield* session.compareAndSetTitle({
+          sessionID: created.id,
+          expected: created.title,
+          title: "Generated chat title",
+        }),
+      ).toBe(true)
+      expect((yield* session.get(created.id)).title).toBe("Generated chat title")
     }),
   )
 

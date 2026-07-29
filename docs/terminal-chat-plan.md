@@ -2,7 +2,22 @@
 
 ## Status
 
-Planning document. No chatbot implementation exists yet. Revised after three independent review cycles.
+Release 1 implementation candidate. The design was revised after three independent
+planning-review cycles and the implementation after three independent audits. Local release gates
+are recorded in the completing commit. The opt-in paid AWS smoke test is intentionally not run
+unless `RUN_AWS_SMOKE=1` is supplied in an authorized AWS environment.
+
+Local verification completed on 2026-07-29:
+
+- Python wrapper, API, security, sandbox, policy, and reproducible packaging: 38 tests passed.
+- Focused V2 Session, runner, compaction, title, migration, and model routing: 159 tests passed.
+- Public schema and event manifest: 15 tests passed.
+- Session HTTP API, including title guards and durable prompt retries: 22 tests passed.
+- Schema, core, protocol, server, generated client, and OpenCode package typechecks passed.
+- Protocol generation and `git diff --check` passed.
+- Python import scan found no non-standard-library runtime imports; dependency manifests and
+  lockfiles are unchanged.
+- `RUN_AWS_SMOKE=1`: not run. No paid or live AWS call is part of the default test suite.
 
 ## Purpose
 
@@ -298,7 +313,15 @@ Durable admission does not by itself make an in-flight provider call safely repl
 3. provider execution started with no terminal durable outcome;
 4. provider output completed but final projection not durably settled.
 
-Never resubmit automatically from the terminal. The server may explicitly resume an input only when durable evidence proves provider execution never started. Once a provider call may have started, surface the turn as interrupted or outcome-unknown unless a separate generic recovery design can prove replay is safe. Reconnection classifies state from durable admission, promotion, step, text, and terminal events and never creates a duplicate user row or automatic second Bedrock call.
+Never resubmit automatically from the terminal. A lost admission HTTP response may be reconciled
+once by exact-retrying the same message ID, prompt, and delivery mode; this addresses the durable
+input record and does not create another user row or direct provider call. If that exact retry is
+also ambiguous, retain the ID and block further submissions in that client. The server may
+explicitly resume an input only when durable evidence proves provider execution never started.
+Once a provider call may have started, surface the turn as interrupted or outcome-unknown unless a
+separate generic recovery design can prove replay is safe. Reconnection classifies state from
+durable admission, promotion, step, text, and terminal events and never creates a duplicate user
+row or automatic second Bedrock call.
 
 Current Step events begin only after provider output is observed, so they cannot prove whether a silent provider call started. Publish a durable provider-attempt boundary immediately before the one explicit `llm.stream(request)` call, linked to the turn and promoted input IDs. Recovery may resume only a turn with no durable attempt boundary. A started attempt without a terminal settlement becomes outcome-unknown and is never called automatically again. Add deterministic test-only failpoints at admission, promotion, attempt start, provider completion, and terminal settlement.
 
@@ -615,7 +638,7 @@ Do not force a 200,000-token live test. Compaction thresholds belong in determin
 
 ### Release 1 acceptance checklist
 
-- Phases 1 through 4 and all default test layers pass.
+- Phases 0 through 5 and all mandatory default test layers pass.
 - Visible replies, compaction summaries, and titles select only an approved Claude inference profile through Amazon Bedrock.
 - New sessions receive a client-generated, server-confirmed ID and an automatic Claude title after the first completed exchange.
 - Durable transcript, ten-turn retention, 200,000-token ceiling, interruption, and conservative crash behavior pass native integration tests.
@@ -626,7 +649,7 @@ Do not force a 200,000-token live test. Compaction thresholds belong in determin
 - `pyproject.toml` has no new runtime dependency; package manifests and the Bun lockfile add no chatbot dependency.
 - The installed artifact requires only Python 3.10+, bundled `opencode`, existing `bwrap`, CA/system libraries, and the installer utilities already documented.
 - `opencode-bedrock chat --help` and a native fake-provider chat run with network disabled and without pip, `bun install`, Git, GitHub, or registry access.
-- The opt-in AWS smoke passes in its isolated test-owned workspace and state root.
+- The opt-in AWS smoke is recorded as passed or not run. A real failure blocks promotion to that AWS environment; unavailable AWS access does not block the offline artifact.
 - The checksummed archive and standalone installer verification pass.
 
 ## Security and privacy checks
@@ -728,8 +751,10 @@ Consolidated decisions:
 
 - Make V2 Amazon Bedrock routing and explicit model limits the first implementation prerequisite.
 - Define session IDs as client-generated and server-confirmed, and resume the last terminal-selected chat rather than claiming updated-time behavior.
+- Add immutable Session purpose because current-agent classification is mutable.
+- Add a durable pre-call provider-attempt boundary because absence of assistant output does not prove a provider call never started.
 - Require approved Claude-through-Bedrock profiles for visible replies, summaries, and titles, with no fallback.
-- Treat the non-streaming loop as an unpublished internal skeleton; Release 1 requires compaction, recovery, streaming reconciliation, Claude naming, packaging, and all acceptance gates.
+- Treat the non-streaming loop as an unpublished internal skeleton; Release 1 requires compaction, recovery, streaming reconciliation, Claude naming, packaging, and all mandatory acceptance gates.
 - Use the global live event stream for best-effort deltas and the per-session durable stream for truth and recovery.
 - Add explicit Release 1 checks for filesystem modes, atomic state, identifier encoding, log privacy, exact local runtime prerequisites, network-disabled artifact execution, and safe test-owned AWS smoke cleanup.
-- Sequence implementation vertically: Bedrock route and limits; isolated durable chat; context and recovery; streaming and naming; packaging and release.
+- Freeze and test core durability, context, and naming contracts before Protocol regeneration, Python integration, streaming, and packaging.

@@ -13,11 +13,15 @@ import { Revert } from "./revert"
 export const ID = SessionID
 export type ID = SessionID
 
+export const Purpose = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,63}$/))
+export type Purpose = typeof Purpose.Type
+
 export const Event = SessionEvent
 
 export interface Info extends Schema.Schema.Type<typeof Info> {}
 export const Info = Schema.Struct({
   id: ID,
+  purpose: Purpose.pipe(optional),
   parentID: ID.pipe(optional),
   projectID: Project.ID,
   agent: Agent.ID.pipe(optional),

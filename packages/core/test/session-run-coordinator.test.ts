@@ -392,6 +392,48 @@ describe("SessionRunCoordinator", () => {
     ),
   )
 
+  it.effect("waits passively for active and coalesced work without starting a drain", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const gate = yield* Deferred.make<void>()
+        let runs = 0
+        const coordinator = yield* SessionRunCoordinator.make({
+          drain: () => Effect.sync(() => ++runs).pipe(Effect.andThen(Deferred.await(gate))),
+        })
+
+        yield* coordinator.awaitIdle("idle")
+        expect(runs).toBe(0)
+        yield* coordinator.wake("session")
+        const waiting = yield* coordinator.awaitIdle("session").pipe(Effect.forkChild)
+        yield* Effect.yieldNow
+        expect(runs).toBe(1)
+        yield* Deferred.succeed(gate, undefined)
+        yield* Fiber.join(waiting)
+      }),
+    ),
+  )
+
+  it.effect("serializes caller-supplied effects with drains and preserves pending wakes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const effectStarted = yield* Deferred.make<void>()
+        const effectGate = yield* Deferred.make<void>()
+        const drained = yield* Deferred.make<void>()
+        const coordinator = yield* SessionRunCoordinator.make({
+          drain: () => Deferred.succeed(drained, undefined),
+        })
+        const operation = Deferred.succeed(effectStarted, undefined).pipe(Effect.andThen(Deferred.await(effectGate)))
+
+        const running = yield* coordinator.runEffect("session", operation).pipe(Effect.forkChild)
+        yield* Deferred.await(effectStarted)
+        yield* coordinator.wake("session")
+        yield* Deferred.succeed(effectGate, undefined)
+        yield* Fiber.join(running)
+        yield* Deferred.await(drained)
+      }),
+    ),
+  )
+
   it.effect("trampolines synchronous self-waking execution", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 
 from . import __version__
+from .chat import run as run_chat
+from .chat import sanitize
 from .errors import BedrockError
 from .projects import Project, list_projects
 from .projects import add as add_project
@@ -68,6 +70,24 @@ def parser() -> argparse.ArgumentParser:
         help="use another Bedrock inference profile for one agent",
     )
 
+    chat = commands.add_parser("chat", help="open a focused Bedrock terminal chat")
+    _selector(chat)
+    chat.add_argument("--allow-non-git", action="store_true")
+    chat.add_argument(
+        "--region", default=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    )
+    chat.add_argument("--inference-profile", default=os.environ.get("BEDROCK_INFERENCE_PROFILE"))
+    chat.add_argument("--endpoint", default=os.environ.get("BEDROCK_RUNTIME_ENDPOINT"))
+    chat.add_argument(
+        "--headless-policy", choices=["approval", "workspace-write"], default="approval"
+    )
+    chat.add_argument("--port", type=int)
+    chat.add_argument("--opencode-bin")
+    launch = chat.add_mutually_exclusive_group()
+    launch.add_argument("--new", action="store_true")
+    launch.add_argument("--session")
+    chat.add_argument("--no-stream", action="store_true")
+
     for name in ["stop", "restart", "attach", "logs", "task", "tasks"]:
         command = commands.add_parser(name)
         _selector(command)
@@ -109,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return dispatch(args)
     except BedrockError as error:
-        print(f"error: {error}", file=sys.stderr)
+        print(f"error: {sanitize(error)}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
@@ -141,6 +161,42 @@ def dispatch(args: argparse.Namespace) -> int:
         if not args.foreground:
             print_record(record)
         return 0
+    if args.command == "chat":
+        project, workspace = selection(
+            args, required=True, allow_non_git=args.allow_non_git
+        )
+        assert workspace is not None
+        try:
+            record = find_record(
+                project.name if project else None, workspace, require_running=False
+            )
+        except BedrockError:
+            record = None
+        if record is None or not alive(record):
+            if not args.region:
+                raise BedrockError("set --region or AWS_REGION to start the workspace service")
+            if not args.inference_profile:
+                raise BedrockError(
+                    "set --inference-profile or BEDROCK_INFERENCE_PROFILE "
+                    "to start the workspace service"
+                )
+            record = start_service(
+                workspace=workspace,
+                project=project.name if project else None,
+                region=args.region,
+                inference_profile=args.inference_profile,
+                endpoint=args.endpoint,
+                headless_policy=args.headless_policy,
+                foreground=False,
+                port=args.port,
+                opencode_value=args.opencode_bin,
+            )
+        return run_chat(
+            record,
+            new=args.new,
+            session_id=args.session,
+            no_stream=args.no_stream,
+        )
     if args.command == "status":
         return status_command(args)
     if args.command in {"stop", "restart", "attach", "logs", "task", "tasks"}:

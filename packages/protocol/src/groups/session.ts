@@ -24,6 +24,7 @@ import { SessionEvent } from "@opencode-ai/schema/session-event"
 
 const SessionsQueryFields = {
   workspace: Workspace.ID.pipe(Schema.optional),
+  purpose: Session.Purpose.pipe(Schema.optional),
   limit: Schema.NumberFromString.pipe(Schema.decodeTo(PositiveInt), Schema.optional).annotate({
     description: "Maximum number of sessions to return. Defaults to the newest 50 sessions.",
   }),
@@ -129,11 +130,13 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
       HttpApiEndpoint.post("session.create", "/api/session", {
         payload: Schema.Struct({
           id: Session.ID.pipe(Schema.optional),
+          purpose: Session.Purpose.pipe(Schema.optional),
           agent: Agent.ID.pipe(Schema.optional),
           model: Model.Ref.pipe(Schema.optional),
           location: Location.Ref.pipe(Schema.optional),
         }),
         success: Schema.Struct({ data: Session.Info }),
+        error: ConflictError,
       }).annotateMerge(
         OpenApi.annotations({
           identifier: "v2.session.create",
@@ -141,6 +144,42 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
           description: "Create a session at the requested location.",
         }),
       ),
+    )
+    .add(
+      HttpApiEndpoint.post("session.compareAndSetTitle", "/api/session/:sessionID/title", {
+        params: { sessionID: Session.ID },
+        payload: Schema.Struct({
+          expected: Schema.String,
+          title: Schema.String.check(Schema.isMaxLength(100)),
+        }),
+        success: Schema.Struct({ data: Schema.Struct({ updated: Schema.Boolean }) }),
+        error: SessionNotFoundError,
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(
+          OpenApi.annotations({
+            identifier: "v2.session.compareAndSetTitle",
+            summary: "Compare and set session title",
+            description: "Replace a session title only when its current value exactly matches the expected title.",
+          }),
+        ),
+    )
+    .add(
+      HttpApiEndpoint.post("session.ensureTitle", "/api/session/:sessionID/title/ensure", {
+        params: { sessionID: Session.ID },
+        payload: Schema.Struct({ firstMessageID: SessionMessage.ID }),
+        success: Schema.Struct({ data: Schema.Struct({ title: Schema.String }) }),
+        error: [SessionNotFoundError, ServiceUnavailableError],
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(
+          OpenApi.annotations({
+            identifier: "v2.session.ensureTitle",
+            summary: "Ensure a generated session title",
+            description:
+              "Generate one tool-free title from a completed exchange through the session model and compare-and-set the default title.",
+          }),
+        ),
     )
     .add(
       HttpApiEndpoint.get("session.active", "/api/session/active", {

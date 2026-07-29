@@ -95,6 +95,8 @@ const execution = Layer.effect(
       active: coordinator.active,
       resume: coordinator.run,
       wake: coordinator.wake,
+      awaitIdle: coordinator.awaitIdle,
+      compact: (sessionID) => coordinator.runEffect(sessionID, sessionRunner.compact(sessionID)),
       interrupt: coordinator.interrupt,
     })
   }),

@@ -23,6 +23,25 @@ class PolicyTests(unittest.TestCase):
         self.assertNotIn("rg *", config["permission"]["bash"])
         self.assertEqual(config["permission"]["external_directory"], "deny")
         self.assertEqual(config["permission"]["webfetch"], "deny")
+        provider = config["provider"]["amazon-bedrock"]
+        self.assertEqual(provider["npm"], "@ai-sdk/amazon-bedrock")
+        self.assertEqual(
+            provider["models"]["opus"]["limit"],
+            {"context": 200_000, "input": 200_000, "output": 20_000},
+        )
+        self.assertEqual(config["agent"]["chat"]["model"], "amazon-bedrock/opus")
+        self.assertFalse(config["agent"]["chat"]["tools_enabled"])
+        self.assertFalse(config["agent"]["chat"]["workspace_instructions"])
+        self.assertEqual(config["agent"]["chat"]["permission"]["*"], "deny")
+        self.assertEqual(
+            config["compaction"],
+            {
+                "auto": True,
+                "tail_turns": 10,
+                "preserve_recent_tokens": 40_000,
+                "reserved": 20_000,
+            },
+        )
 
     def test_workspace_write_only_relaxes_edits(self) -> None:
         config = opencode_config("eu-north-1", "profile-id", None, "workspace-write")
@@ -58,6 +77,10 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(
             config["provider"]["amazon-bedrock"]["models"]["agent-review"]["id"],
             "review-profile",
+        )
+        self.assertEqual(
+            config["provider"]["amazon-bedrock"]["models"]["agent-review"]["limit"],
+            {"context": 200_000, "input": 200_000, "output": 20_000},
         )
         self.assertEqual(config["agent"]["review"]["model"], "amazon-bedrock/agent-review")
 

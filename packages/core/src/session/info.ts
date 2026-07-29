@@ -14,6 +14,7 @@ import { Snapshot } from "../snapshot"
 export function fromRow(row: typeof SessionTable.$inferSelect): SessionSchema.Info {
   return SessionSchema.Info.make({
     id: SessionSchema.ID.make(row.id),
+    purpose: row.purpose ? SessionSchema.Purpose.make(row.purpose) : undefined,
     projectID: ProjectV2.ID.make(row.project_id),
     title: row.title,
     parentID: row.parent_id ? SessionSchema.ID.make(row.parent_id) : undefined,

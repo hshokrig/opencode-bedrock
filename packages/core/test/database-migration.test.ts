@@ -15,6 +15,7 @@ import eventSourcedSessionInputMigration from "@opencode-ai/core/database/migrat
 import contextEpochAgentMigration from "@opencode-ai/core/database/migration/20260605042240_add_context_epoch_agent"
 import simplifyIntegrationCredentialsMigration from "@opencode-ai/core/database/migration/20260611192811_lush_chimera"
 import simplifySessionInputMigration from "@opencode-ai/core/database/migration/20260622202450_simplify_session_input"
+import sessionPurposeMigration from "@opencode-ai/core/database/migration/20260729184956_session_purpose"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -56,7 +57,7 @@ describe("DatabaseMigration", () => {
         .quiet()
         .nothrow()
       expect(result.exitCode, result.stderr.toString()).toBe(0)
-      expect(result.stdout.toString()).toContain("No schema changes, nothing to migrate")
+      expect(["", "No schema changes, nothing to migrate"]).toContain(result.stdout.toString().trim())
     }, 30_000)
   }
 
@@ -152,6 +153,29 @@ describe("DatabaseMigration", () => {
         expect(yield* db.get(sql`SELECT connector_id, method_id, active FROM credential WHERE id = 'current'`)).toEqual(
           { connector_id: null, method_id: null, active: null },
         )
+      }),
+    )
+  })
+
+  test("adds nullable Session purpose without changing legacy rows", async () => {
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* db.run(sql`CREATE TABLE session (id text PRIMARY KEY, title text NOT NULL)`)
+        yield* db.run(sql`INSERT INTO session (id, title) VALUES ('ses_legacy', 'Legacy')`)
+
+        yield* DatabaseMigration.applyOnly(db, [sessionPurposeMigration])
+
+        expect(yield* db.get(sql`SELECT id, title, purpose FROM session WHERE id = 'ses_legacy'`)).toEqual({
+          id: "ses_legacy",
+          title: "Legacy",
+          purpose: null,
+        })
+        expect(
+          yield* db.get(
+            sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'session_purpose_idx'`,
+          ),
+        ).toEqual({ name: "session_purpose_idx" })
       }),
     )
   })

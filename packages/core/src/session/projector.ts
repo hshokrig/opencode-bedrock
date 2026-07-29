@@ -44,6 +44,7 @@ function usage(part: (typeof SessionV1.Event.PartUpdated.Type)["data"]["part"] |
 function sessionRow(info: SessionV1.SessionInfo): typeof SessionTable.$inferInsert {
   return {
     id: info.id,
+    purpose: info.purpose,
     project_id: info.projectID,
     workspace_id: info.workspaceID ?? null,
     parent_id: info.parentID,
@@ -256,6 +257,17 @@ const layer = Layer.effectDiscard(
         yield* SessionContextEpoch.reset(db, event.data.sessionID)
       }),
     )
+    yield* events.project(SessionEvent.TitleUpdated, (event) =>
+      db
+        .update(SessionTable)
+        .set({
+          title: event.data.title,
+          time_updated: DateTime.toEpochMillis(event.data.timestamp),
+        })
+        .where(and(eq(SessionTable.id, event.data.sessionID), eq(SessionTable.title, event.data.expected)))
+        .run()
+        .pipe(Effect.orDie),
+    )
     yield* events.project(SessionV1.Event.Deleted, (event) =>
       db.delete(SessionTable).where(eq(SessionTable.id, event.data.sessionID)).run().pipe(Effect.orDie),
     )
@@ -374,6 +386,8 @@ const layer = Layer.effectDiscard(
         })
       }),
     )
+    yield* events.project(SessionEvent.ProviderAttemptStarted, () => Effect.void)
+    yield* events.project(SessionEvent.ProviderAttemptEnded, () => Effect.void)
     yield* events.project(SessionEvent.ContextUpdated, (event) => run(db, event))
     yield* events.project(SessionEvent.Synthetic, (event) => run(db, event))
     yield* events.project(SessionEvent.Shell.Started, (event) => run(db, event))
@@ -392,6 +406,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Reasoning.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Reasoning.Ended, (event) => run(db, event))
     // yield* events.project(SessionEvent.Retried, (event) => run(db, event))
+    yield* events.project(SessionEvent.Compaction.Failed, () => Effect.void)
     yield* events.project(SessionEvent.Compaction.Ended, (event) => run(db, event))
     yield* events.project(SessionEvent.RevertEvent.Staged, (event) =>
       db

@@ -122,7 +122,10 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }),
         )
       },
+      "session.next.title.updated": () => Effect.void,
       "session.next.moved": () => Effect.void,
+      "session.next.provider-attempt.started": () => Effect.void,
+      "session.next.provider-attempt.ended": () => Effect.void,
       "session.next.prompted": (event) => {
         return adapter.appendMessage(
           SessionMessage.User.make({
@@ -374,6 +377,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       "session.next.retried": () => Effect.void,
       "session.next.compaction.started": () => Effect.void,
       "session.next.compaction.delta": () => Effect.void,
+      "session.next.compaction.failed": () => Effect.void,
       "session.next.compaction.ended": (event) => {
         return adapter.appendMessage(
           SessionMessage.Compaction.make({

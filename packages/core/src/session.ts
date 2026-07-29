@@ -54,6 +54,7 @@ export { ListAnchor }
 
 const ListInputBase = {
   workspaceID: WorkspaceV2.ID.pipe(Schema.optional),
+  purpose: SessionSchema.Purpose.pipe(Schema.optional),
   search: Schema.String.pipe(Schema.optional),
   limit: PositiveInt.pipe(Schema.optional),
   order: Schema.Literals(["asc", "desc"]).pipe(Schema.optional),
@@ -78,6 +79,7 @@ export type ListInput = typeof ListInput.Type
 
 type CreateInput = {
   id?: SessionSchema.ID
+  purpose?: SessionSchema.Purpose
   agent?: AgentV2.ID
   model?: ModelV2.Ref
   location: Location.Ref
@@ -105,14 +107,23 @@ export class PromptConflictError extends Schema.TaggedErrorClass<PromptConflictE
   sessionID: SessionSchema.ID,
   messageID: SessionMessage.ID,
 }) {}
+
+export class CreateConflictError extends Schema.TaggedErrorClass<CreateConflictError>()("Session.CreateConflictError", {
+  sessionID: SessionSchema.ID,
+}) {}
 export const MessageNotFoundError = SessionRevert.MessageNotFoundError
 export type MessageNotFoundError = SessionRevert.MessageNotFoundError
 
-export type Error = NotFoundError | MessageDecodeError | OperationUnavailableError | PromptConflictError
+export type Error =
+  | NotFoundError
+  | MessageDecodeError
+  | OperationUnavailableError
+  | PromptConflictError
+  | CreateConflictError
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
-  readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info>
+  readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info, CreateConflictError>
   readonly get: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info, NotFoundError>
   readonly messages: (input: {
     sessionID: SessionSchema.ID
@@ -144,6 +155,11 @@ export interface Interface {
     sessionID: SessionSchema.ID
     model: ModelV2.Ref
   }) => Effect.Effect<void, NotFoundError>
+  readonly compareAndSetTitle: (input: {
+    sessionID: SessionSchema.ID
+    expected: string
+    title: string
+  }) => Effect.Effect<boolean, NotFoundError>
   readonly prompt: (input: {
     id?: SessionMessage.ID
     sessionID: SessionSchema.ID
@@ -208,7 +224,10 @@ const layer = Layer.effect(
       create: Effect.fn("V2Session.create")(function* (input) {
         const sessionID = input.id ?? SessionSchema.ID.create()
         const recorded = yield* store.get(sessionID)
-        if (recorded) return recorded
+        if (recorded) {
+          if (recorded.purpose !== input.purpose) return yield* new CreateConflictError({ sessionID })
+          return recorded
+        }
         const project = yield* projects.resolve(input.location.directory)
         yield* db
           .insert(ProjectTable)
@@ -219,6 +238,7 @@ const layer = Layer.effect(
         const now = Date.now()
         const info = SessionV1.SessionInfo.make({
           id: sessionID,
+          purpose: input.purpose,
           slug: Slug.create(),
           version: InstallationVersion,
           projectID: project.id,
@@ -256,7 +276,7 @@ const layer = Layer.effect(
                 )
             }),
           )
-        if (projected.type === "existing") return projected.session
+        if (projected.type === "existing") return yield* result.create(input)
         // TODO: Restore recorded sessions onto replacement synchronized workspaces in a future API slice.
         return yield* result.get(sessionID).pipe(Effect.orDie)
       }),
@@ -273,6 +293,7 @@ const layer = Layer.effect(
         const conditions: SQL[] = []
         if ("directory" in input) conditions.push(eq(SessionTable.directory, input.directory))
         if (input.workspaceID) conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
+        if (input.purpose) conditions.push(eq(SessionTable.purpose, input.purpose))
         if ("project" in input) conditions.push(eq(SessionTable.project_id, input.project))
         if (input.search) conditions.push(like(SessionTable.title, `%${input.search}%`))
         if (input.anchor) {
@@ -414,13 +435,25 @@ const layer = Layer.effect(
           model: input.model,
         })
       }),
+      compareAndSetTitle: Effect.fn("V2Session.compareAndSetTitle")(function* (input) {
+        if ((yield* result.get(input.sessionID)).title !== input.expected) return false
+        yield* events.publish(SessionEvent.TitleUpdated, {
+          sessionID: input.sessionID,
+          timestamp: yield* DateTime.now,
+          expected: input.expected,
+          title: input.title,
+        })
+        return (yield* result.get(input.sessionID)).title === input.title
+      }),
       compact: Effect.fn("V2Session.compact")(function* (input) {
         yield* result.get(input.sessionID)
-        return yield* new OperationUnavailableError({ operation: "compact" })
+        yield* execution
+          .compact(input.sessionID)
+          .pipe(Effect.mapError(() => new OperationUnavailableError({ operation: "compact" })))
       }),
       wait: Effect.fn("V2Session.wait")(function* (sessionID) {
         yield* result.get(sessionID)
-        return yield* new OperationUnavailableError({ operation: "wait" })
+        yield* execution.awaitIdle(sessionID)
       }),
       active: execution.active,
       resume: Effect.fn("V2Session.resume")(function* (sessionID) {
