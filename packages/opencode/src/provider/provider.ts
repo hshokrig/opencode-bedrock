@@ -328,6 +328,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       )
 
       if (
+        !providerConfig &&
         !profile &&
         !awsAccessKeyId &&
         !awsBearerToken &&
@@ -366,6 +367,8 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         },
         async getModel(sdk: any, modelID: string, options?: Record<string, any>, model?: Model) {
           if (model?.api.npm === "@ai-sdk/amazon-bedrock/mantle") return selectBedrockMantleLanguageModel(sdk, modelID)
+
+          if (modelID.startsWith("arn:") || (model && model.id !== modelID)) return sdk.languageModel(modelID)
 
           // Skip region prefixing if model already has a cross-region inference profile prefix
           // Models from models.dev may already include prefixes like us., eu., global., etc.

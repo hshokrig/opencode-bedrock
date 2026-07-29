@@ -1,0 +1,71 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "InspectSelectedInferenceProfile",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:GetInferenceProfile",
+        "bedrock:ListInferenceProfiles"
+      ],
+      "Resource": [
+        "PROFILE_ARN"
+      ]
+    },
+    {
+      "Sid": "InvokeSelectedInferenceProfile",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "PROFILE_ARN"
+      ]
+    },
+    {
+      "Sid": "InvokeProfileFoundationModels",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "FOUNDATION_MODEL_ARN_IN_SOURCE_REGION",
+        "FOUNDATION_MODEL_ARN_IN_EACH_DESTINATION_REGION"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "bedrock:InferenceProfileArn": "PROFILE_ARN"
+        }
+      }
+    },
+    {
+      "Sid": "ReadOfflineArtifactPrefix",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::APPROVED_ARTIFACT_BUCKET/APPROVED_PREFIX/*"
+      ]
+    },
+    {
+      "Sid": "ListOfflineArtifactPrefix",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::APPROVED_ARTIFACT_BUCKET"
+      ],
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "APPROVED_PREFIX/*"
+          ]
+        }
+      }
+    }
+  ]
+}

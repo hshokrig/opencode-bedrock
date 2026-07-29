@@ -1,4 +1,5 @@
 import path from "path"
+import { realpathSync } from "fs"
 import { Effect } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import type * as Tool from "./tool"
@@ -22,7 +23,7 @@ export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirec
   if (options?.bypass) return false
 
   const ins = yield* InstanceState.context
-  const full = process.platform === "win32" ? FSUtil.normalizePath(target) : target
+  const full = canonical(target)
   if (containsPath(full, ins)) return false
 
   const kind = options?.kind ?? "file"
@@ -43,6 +44,24 @@ export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirec
   })
   return true
 })
+
+function canonical(target: string) {
+  const full = path.resolve(FSUtil.windowsPath(target))
+  const missing: string[] = []
+  let current = full
+
+  while (true) {
+    try {
+      return path.join(realpathSync.native(current), ...missing)
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error
+      const parent = path.dirname(current)
+      if (parent === current) return FSUtil.normalizePath(full)
+      missing.unshift(path.basename(current))
+      current = parent
+    }
+  }
+}
 
 export async function assertExternalDirectory(ctx: Tool.Context, target?: string, options?: Options) {
   return Effect.runPromise(assertExternalDirectoryEffect(ctx, target, options))

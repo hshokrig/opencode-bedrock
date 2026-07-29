@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencode-bedrock"
+version = "0.1.0"
+description = "Bedrock-first persistent service wrapper for OpenCode"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+
+[project.scripts]
+opencode-bedrock = "opencode_bedrock.cli:main"
+
+[tool.setuptools]
+packages = ["opencode_bedrock"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+pythonVersion = "3.10"
+include = ["opencode_bedrock", "tests/bedrock"]

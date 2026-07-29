@@ -229,6 +229,76 @@ it.instance(
   { config: { provider: { "amazon-bedrock": { options: { region: "us-east-1" } } } } },
 )
 
+it.instance(
+  "Bedrock: configured provider uses the default credential chain without credential environment variables",
+  () =>
+    Effect.gen(function* () {
+      yield* set("AWS_PROFILE", "")
+      yield* set("AWS_ACCESS_KEY_ID", "")
+      yield* set("AWS_BEARER_TOKEN_BEDROCK", "")
+      yield* set("AWS_WEB_IDENTITY_TOKEN_FILE", "")
+      const providers = yield* list
+      expect(providers[ProviderV2.ID.amazonBedrock]).toBeDefined()
+      expect(providers[ProviderV2.ID.amazonBedrock].options?.region).toBe("eu-north-1")
+      expect(providers[ProviderV2.ID.amazonBedrock].options?.credentialProvider).toBeFunction()
+    }),
+  { config: { provider: { "amazon-bedrock": { options: { region: "eu-north-1" } } } } },
+)
+
+it.instance(
+  "Bedrock: preserves a full model or inference-profile ARN",
+  () =>
+    Effect.gen(function* () {
+      yield* set("AWS_PROFILE", "")
+      yield* set("AWS_ACCESS_KEY_ID", "")
+      const model = yield* Provider.use.getModel(ProviderV2.ID.amazonBedrock, ModelV2.ID.make("configured-profile"))
+      const language = yield* Provider.use.getLanguage(model)
+      expect((language as { modelId: string }).modelId).toBe(
+        "arn:aws:bedrock:eu-north-1::foundation-model/anthropic.claude-opus-test",
+      )
+    }),
+  {
+    config: {
+      provider: {
+        "amazon-bedrock": {
+          options: { region: "eu-north-1" },
+          models: {
+            "configured-profile": {
+              id: "arn:aws:bedrock:eu-north-1::foundation-model/anthropic.claude-opus-test",
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "Bedrock: preserves an explicitly aliased inference-profile ID",
+  () =>
+    Effect.gen(function* () {
+      yield* set("AWS_PROFILE", "")
+      yield* set("AWS_ACCESS_KEY_ID", "")
+      const model = yield* Provider.use.getModel(ProviderV2.ID.amazonBedrock, ModelV2.ID.make("profile-alias"))
+      const language = yield* Provider.use.getLanguage(model)
+      expect((language as { modelId: string }).modelId).toBe("application-claude-opus-profile")
+    }),
+  {
+    config: {
+      provider: {
+        "amazon-bedrock": {
+          options: { region: "eu-north-1" },
+          models: {
+            "profile-alias": {
+              id: "application-claude-opus-profile",
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
 // Cross-region inference profile prefix handling.
 // Models from models.dev may come with prefixes already (e.g. us., eu., global.).
 // These should NOT be double-prefixed when passed to the SDK.

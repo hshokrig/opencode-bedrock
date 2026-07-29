@@ -3,6 +3,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { describe, expect } from "bun:test"
 import path from "path"
 import { Effect } from "effect"
+import { symlink } from "fs/promises"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import type { Tool } from "@/tool/tool"
 import { assertExternalDirectoryEffect } from "../../src/tool/external-directory"
@@ -94,6 +95,40 @@ describe("tool.assertExternalDirectory", () => {
       expect(req!.always).toEqual([expected])
     }),
   )
+
+  if (process.platform !== "win32") {
+    it.instance("asks when a file path escapes through a symlink", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const outside = yield* tmpdirScoped()
+        const link = path.join(test.directory, "outside-link")
+        yield* Effect.promise(() => symlink(outside, link, "dir"))
+        const { requests, ctx } = makeCtx()
+
+        yield* assertExternalDirectoryEffect(ctx, path.join(link, "secret.txt"))
+
+        const req = requests.find((r) => r.permission === "external_directory")
+        expect(req).toBeDefined()
+        expect(req!.patterns).toEqual([glob(path.join(outside, "*"))])
+      }),
+    )
+
+    it.instance("asks when a new nested path escapes through a symlink", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const outside = yield* tmpdirScoped()
+        const link = path.join(test.directory, "outside-link")
+        yield* Effect.promise(() => symlink(outside, link, "dir"))
+        const { requests, ctx } = makeCtx()
+
+        yield* assertExternalDirectoryEffect(ctx, path.join(link, "new", "secret.txt"))
+
+        const req = requests.find((r) => r.permission === "external_directory")
+        expect(req).toBeDefined()
+        expect(req!.patterns).toEqual([glob(path.join(outside, "new", "*"))])
+      }),
+    )
+  }
 
   it.live("skips prompting when bypass=true", () =>
     Effect.gen(function* () {

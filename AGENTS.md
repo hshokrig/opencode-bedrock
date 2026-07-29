@@ -1,8 +1,18 @@
+- This fork packages OpenCode as a Bedrock-first SageMaker service. Keep specialization code in
+  `opencode_bedrock`, `scripts`, `policies`, and the root `docs` directory when an upstream extension point is
+  sufficient.
+- Do not add live Bedrock or SageMaker calls to the default test suite. AWS smoke tests must stay behind
+  `RUN_AWS_SMOKE=1`.
+- Never commit AWS account IDs, role ARNs, inference-profile ARNs, bucket names, access keys, or session tokens.
+- Keep the service bound to `127.0.0.1`. Do not weaken the bubblewrap workspace boundary or detached approval
+  policy without an explicit security review.
+- Update `UPSTREAM_REVISION` and `docs/upstream-sync.md` when importing a new upstream commit.
+
 - To regenerate the legacy JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
 - After changing the public Protocol or Server `HttpApi`, run `bun run generate` from `packages/client`. Do not edit `src/generated` or `src/generated-effect` directly.
 - Keep runtime dependencies directed from Schema to Core and Protocol, then from Core and Protocol to Server. Client runtime code may depend on Schema and Protocol but never Core or Server; `sdk-next` composes Client, Core, and Server.
-- The default branch in this repo is `dev`.
-- Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
+- This fork publishes the Bedrock specialization from `main`; OpenCode upstream uses `dev`.
+- Use `upstream/dev` for upstream comparisons and `main` or `origin/main` for specialization diffs.
 
 ## Branch Names
 
