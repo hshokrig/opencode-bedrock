@@ -8,6 +8,7 @@ import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
 import { WorkspaceRoutingMiddleware, WorkspaceRoutingQuery } from "../middleware/workspace-routing"
 import { described } from "./metadata"
+import { ServiceUnavailableError } from "../errors"
 
 const root = "/experimental/workspace"
 export const CreatePayload = Schema.Struct(Struct.omit(Workspace.CreateInput.fields, ["projectID"]))
@@ -118,7 +119,7 @@ export const WorkspaceApi = HttpApi.make("workspace")
           query: WorkspaceRoutingQuery,
           payload: WarpPayload,
           success: described(HttpApiSchema.NoContent, "Session warped"),
-          error: [ApiWorkspaceWarpError, ApiVcsApplyError, ApiNotFoundError],
+          error: [ApiWorkspaceWarpError, ApiVcsApplyError, ApiNotFoundError, ServiceUnavailableError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "experimental.workspace.warp",

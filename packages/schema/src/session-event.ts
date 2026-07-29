@@ -126,11 +126,7 @@ export const ProviderAttemptEnded = Event.define({
   schema: {
     ...Base,
     attemptID: Schema.String,
-    outcome: Schema.Union([
-      Schema.Literal("completed"),
-      Schema.Literal("failed"),
-      Schema.Literal("interrupted"),
-    ]),
+    outcome: Schema.Union([Schema.Literal("completed"), Schema.Literal("failed"), Schema.Literal("interrupted")]),
   },
 })
 export type ProviderAttemptEnded = typeof ProviderAttemptEnded.Type
@@ -463,6 +459,11 @@ export namespace Compaction {
       reason: Started.data.fields.reason,
       text: Schema.String,
       recent: Schema.String,
+      retainedMessageIDs: Schema.Array(SessionMessage.ID).pipe(optional),
+      continuation: Schema.Struct({
+        attemptID: Schema.String,
+        inputMessageIDs: Schema.Array(SessionMessage.ID),
+      }).pipe(optional),
     },
   })
   export type Ended = typeof Ended.Type

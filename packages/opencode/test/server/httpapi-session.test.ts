@@ -4,7 +4,7 @@ import { NodeHttpServer, NodeServices } from "@effect/platform-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { mkdir } from "node:fs/promises"
 import path from "node:path"
-import { Cause, Config, Effect, Exit, Layer } from "effect"
+import { Cause, Config, Effect, Exit, Layer, Schema } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse, HttpRouter, HttpServer } from "effect/unstable/http"
 import { layerWebSocketConstructorGlobal } from "effect/unstable/socket/Socket"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -153,6 +153,47 @@ const insertLegacyAssistantMessage = (sessionID: SessionIDType, seq = 1, time = 
       .run()
       .pipe(Effect.orDie)
     return message
+  })
+
+const insertV2Exchange = (sessionID: SessionIDType, userID: SessionMessage.ID, seq: number) =>
+  Effect.gen(function* () {
+    const time = DateTime.makeUnsafe(seq)
+    const messages = [
+      SessionMessage.User.make({
+        id: userID,
+        type: "user",
+        text: `question ${seq}`,
+        time: { created: time },
+      }),
+      SessionMessage.Assistant.make({
+        id: SessionMessage.ID.create(),
+        type: "assistant",
+        agent: "chat",
+        model: { id: ModelV2.ID.make("opus"), providerID: ProviderV2.ID.amazonBedrock },
+        content: [
+          SessionMessage.AssistantText.make({
+            id: `text-${seq}`,
+            type: "text",
+            text: `answer ${seq}`,
+          }),
+        ],
+        finish: "stop",
+        time: { created: time, completed: time },
+      }),
+    ]
+    const encode = Schema.encodeSync(SessionMessage.Message)
+    const rows = messages.map((message, index) => {
+      const { id, type, ...data } = encode(message)
+      return {
+        id: SessionMessage.ID.make(id),
+        session_id: sessionID,
+        type,
+        seq: seq + index,
+        time_created: seq + index,
+        data,
+      }
+    })
+    yield* (yield* Database.Service).db.insert(SessionMessageTable).values(rows).run().pipe(Effect.orDie)
   })
 
 const insertCorruptV2Message = (sessionID: SessionIDType, time = 1) =>
@@ -542,6 +583,10 @@ describe("session HttpApi", () => {
         expect(context.status).toBe(404)
         expect(yield* responseJson(context)).toEqual(expected)
 
+        const recovery = yield* request(`/api/session/${missing}/recovery`, { headers })
+        expect(recovery.status).toBe(404)
+        expect(yield* responseJson(recovery)).toEqual(expected)
+
         const compact = yield* request(`/api/session/${missing}/compact`, { method: "POST", headers })
         expect(compact.status).toBe(404)
         expect(yield* responseJson(compact)).toEqual(expected)
@@ -549,6 +594,14 @@ describe("session HttpApi", () => {
         const wait = yield* request(`/api/session/${missing}/wait`, { method: "POST", headers })
         expect(wait.status).toBe(404)
         expect(yield* responseJson(wait)).toEqual(expected)
+
+        const events = yield* request(`/api/session/${missing}/event`, { headers })
+        expect(events.status).toBe(404)
+        expect(yield* responseJson(events)).toEqual(expected)
+
+        const interrupt = yield* request(`/api/session/${missing}/interrupt`, { method: "POST", headers })
+        expect(interrupt.status).toBe(404)
+        expect(yield* responseJson(interrupt)).toEqual(expected)
 
         const prompt = yield* request(`/api/session/${missing}/prompt`, {
           method: "POST",
@@ -585,6 +638,25 @@ describe("session HttpApi", () => {
         expect(retriedBody).toEqual(firstBody)
         expect(firstBody).toMatchObject({
           data: { id: "msg_http_prompt", prompt: { text: "hello" }, delivery: "steer" },
+        })
+
+        const recovery = yield* requestJson<{
+          data: {
+            unfinishedProviderAttempt: boolean
+            unfinishedCompaction: boolean
+            unresolvedInput: boolean
+            attemptedUnsettledInput: boolean
+            requestedInputStatus: string
+            otherUnresolvedInput: boolean
+          }
+        }>(`/api/session/${session.id}/recovery?messageID=msg_http_prompt`, { headers })
+        expect(recovery.data).toEqual({
+          unfinishedProviderAttempt: false,
+          unfinishedCompaction: false,
+          unresolvedInput: true,
+          attemptedUnsettledInput: false,
+          requestedInputStatus: "unattempted",
+          otherUnresolvedInput: false,
         })
 
         const messages = yield* requestJson<{ data: PromptBody[] }>(`/api/session/${session.id}/message`, {
@@ -644,11 +716,132 @@ describe("session HttpApi", () => {
         const headers = { "x-opencode-directory": test.directory }
         const session = yield* createSession({ title: "v2 unavailable" })
 
+        const recovery = yield* requestJson<{
+          data: {
+            unfinishedProviderAttempt: boolean
+            unfinishedCompaction: boolean
+            unresolvedInput: boolean
+            attemptedUnsettledInput: boolean
+            requestedInputStatus: string
+            otherUnresolvedInput: boolean
+          }
+        }>(`/api/session/${session.id}/recovery`, { headers })
+        expect(recovery.data).toEqual({
+          unfinishedProviderAttempt: false,
+          unfinishedCompaction: false,
+          unresolvedInput: false,
+          attemptedUnsettledInput: false,
+          requestedInputStatus: "not-requested",
+          otherUnresolvedInput: false,
+        })
+
         const compact = yield* request(`/api/session/${session.id}/compact`, { method: "POST", headers })
         expect(compact.status).toBe(204)
 
         const wait = yield* request(`/api/session/${session.id}/wait`, { method: "POST", headers })
         expect(wait.status).toBe(204)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "rejects terminal-chat selection changes while normal sessions remain switchable",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const normal = yield* createSession({ title: "normal selection" })
+        const invalid = yield* request("/api/session", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ purpose: "terminal-chat" }),
+        })
+        expect(invalid.status).toBe(400)
+        expect(yield* responseJson(invalid)).toMatchObject({
+          _tag: "InvalidRequestError",
+          kind: "terminal-chat-configuration",
+        })
+        const created = yield* requestJson<{ data: { id: string } }>("/api/session", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            purpose: "terminal-chat",
+            agent: "chat",
+            model: { id: "opus", providerID: "amazon-bedrock" },
+            location: { directory: test.directory },
+          }),
+        })
+        const model = { id: "sonnet", providerID: "amazon-bedrock" }
+        const switchAgent = (sessionID: string) =>
+          request(`/api/session/${sessionID}/agent`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ agent: "build" }),
+          })
+        const switchModel = (sessionID: string) =>
+          request(`/api/session/${sessionID}/model`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ model }),
+          })
+
+        expect((yield* switchAgent(normal.id)).status).toBe(204)
+        expect((yield* switchModel(normal.id)).status).toBe(204)
+
+        const agent = yield* switchAgent(created.data.id)
+        expect(agent.status).toBe(503)
+        expect(yield* responseJson(agent)).toMatchObject({
+          _tag: "ServiceUnavailableError",
+          service: "session.switchAgent",
+        })
+        const terminalModel = yield* switchModel(created.data.id)
+        expect(terminalModel.status).toBe(503)
+        expect(yield* responseJson(terminalModel)).toMatchObject({
+          _tag: "ServiceUnavailableError",
+          service: "session.switchModel",
+        })
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+    { timeout: 15000 },
+  )
+
+  it.instance(
+    "rejects every v2 revert mutation for terminal chats",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const created = yield* requestJson<{ data: { id: SessionIDType } }>("/api/session", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            purpose: "terminal-chat",
+            agent: "chat",
+            model: { id: "opus", providerID: "amazon-bedrock" },
+            location: { directory: test.directory },
+          }),
+        })
+        const routes = [
+          {
+            path: `/api/session/${created.data.id}/revert/stage`,
+            body: { messageID: SessionMessage.ID.create() },
+          },
+          { path: `/api/session/${created.data.id}/revert/clear` },
+          { path: `/api/session/${created.data.id}/revert/commit` },
+        ]
+
+        for (const route of routes) {
+          const response = yield* request(route.path, {
+            method: "POST",
+            headers,
+            body: route.body ? JSON.stringify(route.body) : undefined,
+          })
+          expect(response.status).toBe(503)
+          expect(yield* responseJson(response)).toMatchObject({
+            _tag: "ServiceUnavailableError",
+            service: "session.revert",
+          })
+        }
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )
@@ -685,6 +878,158 @@ describe("session HttpApi", () => {
   )
 
   it.instance(
+    "requires title generation to name the first user message",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const created = yield* requestJson<{ data: { id: SessionIDType } }>("/api/session", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            purpose: "terminal-chat",
+            agent: "chat",
+            model: { id: "opus", providerID: "amazon-bedrock" },
+            location: { directory: test.directory },
+          }),
+        })
+        const first = SessionMessage.ID.create()
+        const second = SessionMessage.ID.create()
+        yield* insertV2Exchange(created.data.id, first, 1)
+        yield* insertV2Exchange(created.data.id, second, 3)
+
+        const response = yield* request(`/api/session/${created.data.id}/title/ensure`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ firstMessageID: second }),
+        })
+
+        expect(response.status).toBe(503)
+        expect(yield* responseJson(response)).toMatchObject({
+          _tag: "ServiceUnavailableError",
+          service: "session.title",
+        })
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "denies every legacy session mutation route for terminal chats",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const created = yield* requestJson<{ data: { id: SessionIDType } }>("/api/session", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            purpose: "terminal-chat",
+            agent: "chat",
+            model: { id: "opus", providerID: "amazon-bedrock" },
+            location: { directory: test.directory },
+          }),
+        })
+        const message = yield* createTextMessage(created.data.id, "protected")
+        const permissionID = PermissionV1.ID.ascending()
+        const routes: Array<{ path: string; method: string; body?: unknown }> = [
+          {
+            path: pathFor(SessionPaths.update, { sessionID: created.data.id }),
+            method: "PATCH",
+            body: { title: "legacy title" },
+          },
+          { path: pathFor(SessionPaths.fork, { sessionID: created.data.id }), method: "POST" },
+          { path: pathFor(SessionPaths.abort, { sessionID: created.data.id }), method: "POST" },
+          {
+            path: pathFor(SessionPaths.init, { sessionID: created.data.id }),
+            method: "POST",
+            body: { modelID: "opus", providerID: "amazon-bedrock", messageID: MessageID.ascending() },
+          },
+          { path: pathFor(SessionPaths.share, { sessionID: created.data.id }), method: "POST" },
+          { path: pathFor(SessionPaths.share, { sessionID: created.data.id }), method: "DELETE" },
+          {
+            path: pathFor(SessionPaths.summarize, { sessionID: created.data.id }),
+            method: "POST",
+            body: { providerID: "amazon-bedrock", modelID: "opus" },
+          },
+          {
+            path: pathFor(SessionPaths.prompt, { sessionID: created.data.id }),
+            method: "POST",
+            body: { agent: "chat", noReply: true, parts: [{ type: "text", text: "blocked" }] },
+          },
+          {
+            path: pathFor(SessionPaths.promptAsync, { sessionID: created.data.id }),
+            method: "POST",
+            body: { agent: "chat", noReply: true, parts: [{ type: "text", text: "blocked" }] },
+          },
+          {
+            path: pathFor(SessionPaths.command, { sessionID: created.data.id }),
+            method: "POST",
+            body: { agent: "chat", command: "blocked", arguments: "" },
+          },
+          {
+            path: pathFor(SessionPaths.shell, { sessionID: created.data.id }),
+            method: "POST",
+            body: { agent: "chat", command: "pwd" },
+          },
+          {
+            path: pathFor(SessionPaths.revert, { sessionID: created.data.id }),
+            method: "POST",
+            body: { messageID: message.info.id },
+          },
+          { path: pathFor(SessionPaths.unrevert, { sessionID: created.data.id }), method: "POST" },
+          {
+            path: pathFor(SessionPaths.permissions, {
+              sessionID: created.data.id,
+              permissionID,
+            }),
+            method: "POST",
+            body: { response: "once" },
+          },
+          {
+            path: pathFor(SessionPaths.deleteMessage, {
+              sessionID: created.data.id,
+              messageID: message.info.id,
+            }),
+            method: "DELETE",
+          },
+          {
+            path: pathFor(SessionPaths.deletePart, {
+              sessionID: created.data.id,
+              messageID: message.info.id,
+              partID: message.part.id,
+            }),
+            method: "DELETE",
+          },
+          {
+            path: pathFor(SessionPaths.updatePart, {
+              sessionID: created.data.id,
+              messageID: message.info.id,
+              partID: message.part.id,
+            }),
+            method: "PATCH",
+            body: { ...message.part, text: "blocked" },
+          },
+          { path: pathFor(SessionPaths.remove, { sessionID: created.data.id }), method: "DELETE" },
+        ]
+
+        for (const route of routes) {
+          const response = yield* request(route.path, {
+            method: route.method,
+            headers,
+            body: route.body === undefined ? undefined : JSON.stringify(route.body),
+          })
+          expect(response.status, `${route.method} ${route.path}`).toBe(503)
+          expect(yield* responseJson(response)).toMatchObject({
+            _tag: "ServiceUnavailableError",
+            service: "session.legacyMutation",
+          })
+        }
+      }),
+    { git: true, config: { formatter: false, lsp: false, share: "disabled" } },
+    { timeout: 20000 },
+  )
+
+  it.instance(
     "returns safe v2 unknown errors for corrupt projected messages",
     () =>
       Effect.gen(function* () {
@@ -715,8 +1060,21 @@ describe("session HttpApi", () => {
         })
         expect((contextBody as { ref?: unknown }).ref).toMatch(/^err_[0-9a-f-]{8}$/)
         expect(JSON.stringify(contextBody)).not.toContain("assistant")
+
+        const recovery = yield* request(`/api/session/${session.id}/recovery`, {
+          headers: { "x-opencode-directory": test.directory },
+        })
+        const recoveryBody = yield* responseJson(recovery)
+        expect(recovery.status).toBe(500)
+        expect(recoveryBody).toMatchObject({
+          _tag: "UnknownError",
+          message: "Unexpected server error. Check server logs for details.",
+        })
+        expect((recoveryBody as { ref?: unknown }).ref).toMatch(/^err_[0-9a-f-]{8}$/)
+        expect(JSON.stringify(recoveryBody)).not.toContain("assistant")
       }),
     { git: true, config: { formatter: false, lsp: false } },
+    { timeout: 15000 },
   )
 
   it.instance(

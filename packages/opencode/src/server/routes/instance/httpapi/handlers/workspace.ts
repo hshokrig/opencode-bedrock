@@ -2,10 +2,11 @@ import { listAdapters } from "@/control-plane/adapters"
 import { Workspace } from "@/control-plane/workspace"
 import * as InstanceState from "@/effect/instance-state"
 import { Vcs } from "@/project/vcs"
+import { SessionV2 } from "@opencode-ai/core/session"
 import { Cause, Effect } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
-import { notFound } from "../errors"
+import { ServiceUnavailableError, notFound } from "../errors"
 import { ApiVcsApplyError } from "../groups/instance"
 import { ApiWorkspaceCreateError, ApiWorkspaceWarpError, CreatePayload, WarpPayload } from "../groups/workspace"
 
@@ -70,6 +71,11 @@ export const workspaceHandlers = HttpApiBuilder.group(InstanceHttpApi, "workspac
         })
         .pipe(
           Effect.mapError((error) => {
+            if (error instanceof SessionV2.OperationUnavailableError)
+              return new ServiceUnavailableError({
+                message: `Session ${error.operation} is not available`,
+                service: `session.${error.operation}`,
+              })
             if (error instanceof Workspace.WorkspaceNotFoundError) return notFound(error.message)
             if (error instanceof Vcs.PatchApplyError) {
               return new ApiVcsApplyError({

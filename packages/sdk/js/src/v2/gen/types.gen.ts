@@ -18,9 +18,12 @@ export type Event =
   | EventMessagePartRemoved
   | EventSessionNextAgentSwitched
   | EventSessionNextModelSwitched
+  | EventSessionNextTitleUpdated
   | EventSessionNextMoved
   | EventSessionNextPrompted
   | EventSessionNextPromptAdmitted
+  | EventSessionNextProviderAttemptStarted
+  | EventSessionNextProviderAttemptEnded
   | EventSessionNextContextUpdated
   | EventSessionNextSynthetic
   | EventSessionNextShellStarted
@@ -45,6 +48,7 @@ export type Event =
   | EventSessionNextCompactionStarted
   | EventSessionNextCompactionDelta
   | EventSessionNextCompactionEnded
+  | EventSessionNextCompactionFailed
   | EventSessionNextRevertStaged
   | EventSessionNextRevertCleared
   | EventSessionNextRevertCommitted
@@ -149,6 +153,12 @@ export type MoveSessionError = {
   }
 }
 
+export type ServiceUnavailableError = {
+  _tag: "ServiceUnavailableError"
+  message: string
+  service?: string
+}
+
 export type SnapshotFileDiff = {
   file?: string
   patch?: string
@@ -169,6 +179,7 @@ export type PermissionRuleset = Array<PermissionRule>
 
 export type Session = {
   id: string
+  purpose?: string
   slug: string
   projectID: string
   workspaceID?: string
@@ -840,6 +851,16 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.title.updated"
+        properties: {
+          timestamp: number
+          sessionID: string
+          expected: string
+          title: string
+        }
+      }
+    | {
+        id: string
         type: "session.next.moved"
         properties: {
           timestamp: number
@@ -868,6 +889,26 @@ export type GlobalEvent = {
           messageID: string
           prompt: Prompt
           delivery: "steer" | "queue"
+        }
+      }
+    | {
+        id: string
+        type: "session.next.provider-attempt.started"
+        properties: {
+          timestamp: number
+          sessionID: string
+          attemptID: string
+          inputMessageIDs: Array<string>
+        }
+      }
+    | {
+        id: string
+        type: "session.next.provider-attempt.ended"
+        properties: {
+          timestamp: number
+          sessionID: string
+          attemptID: string
+          outcome: "completed" | "failed" | "interrupted"
         }
       }
     | {
@@ -1162,6 +1203,22 @@ export type GlobalEvent = {
           reason: "auto" | "manual"
           text: string
           recent: string
+          retainedMessageIDs?: Array<string>
+          continuation?: {
+            attemptID: string
+            inputMessageIDs: Array<string>
+          }
+        }
+      }
+    | {
+        id: string
+        type: "session.next.compaction.failed"
+        properties: {
+          timestamp: number
+          sessionID: string
+          messageID: string
+          reason: "auto" | "manual"
+          failure: "provider-error" | "empty-summary" | "interrupted"
         }
       }
     | {
@@ -1610,9 +1667,12 @@ export type GlobalEvent = {
     | SyncEventMessagePartRemoved
     | SyncEventSessionNextAgentSwitched
     | SyncEventSessionNextModelSwitched
+    | SyncEventSessionNextTitleUpdated
     | SyncEventSessionNextMoved
     | SyncEventSessionNextPrompted
     | SyncEventSessionNextPromptAdmitted
+    | SyncEventSessionNextProviderAttemptStarted
+    | SyncEventSessionNextProviderAttemptEnded
     | SyncEventSessionNextContextUpdated
     | SyncEventSessionNextSynthetic
     | SyncEventSessionNextShellStarted
@@ -1633,6 +1693,7 @@ export type GlobalEvent = {
     | SyncEventSessionNextRetried
     | SyncEventSessionNextCompactionStarted
     | SyncEventSessionNextCompactionEnded
+    | SyncEventSessionNextCompactionFailed
     | SyncEventSessionNextRevertStaged
     | SyncEventSessionNextRevertCleared
     | SyncEventSessionNextRevertCommitted
@@ -1704,6 +1765,8 @@ export type AgentConfig = {
    */
   color?: string | "primary" | "secondary" | "accent" | "success" | "warning" | "error" | "info"
   steps?: number
+  tools_enabled?: boolean
+  workspace_instructions?: boolean
   maxSteps?: number
   permission?: PermissionConfig
   [key: string]:
@@ -2190,6 +2253,7 @@ export type ProjectSummary = {
 
 export type GlobalSession = {
   id: string
+  purpose?: string
   slug: string
   projectID: string
   workspaceID?: string
@@ -2691,8 +2755,10 @@ export type InvalidCursorError = {
   message: string
 }
 
-export type SessionActive = {
-  type: "running"
+export type ConflictError = {
+  _tag: "ConflictError"
+  message: string
+  resource?: string
 }
 
 export type SessionNotFoundError = {
@@ -2701,22 +2767,20 @@ export type SessionNotFoundError = {
   message: string
 }
 
+export type SessionActive = {
+  type: "running"
+}
+
+export type UnknownError1 = {
+  _tag: "UnknownError"
+  message: string
+  ref?: string
+}
+
 export type PromptInput = {
   text: string
   files?: Array<PromptInputFileAttachment>
   agents?: Array<PromptAgentAttachment>
-}
-
-export type ConflictError = {
-  _tag: "ConflictError"
-  message: string
-  resource?: string
-}
-
-export type ServiceUnavailableError = {
-  _tag: "ServiceUnavailableError"
-  message: string
-  service?: string
 }
 
 export type MessageNotFoundError = {
@@ -2726,18 +2790,15 @@ export type MessageNotFoundError = {
   message: string
 }
 
-export type UnknownError1 = {
-  _tag: "UnknownError"
-  message: string
-  ref?: string
-}
-
 export type SessionDurableEvent =
   | SessionNextAgentSwitched
   | SessionNextModelSwitched
+  | SessionNextTitleUpdated
   | SessionNextMoved
   | SessionNextPrompted
   | SessionNextPromptAdmitted
+  | SessionNextProviderAttemptStarted
+  | SessionNextProviderAttemptEnded
   | SessionNextContextUpdated
   | SessionNextSynthetic
   | SessionNextShellStarted
@@ -2758,6 +2819,7 @@ export type SessionDurableEvent =
   | SessionNextRetried
   | SessionNextCompactionStarted
   | SessionNextCompactionEnded
+  | SessionNextCompactionFailed
   | SessionNextRevertStaged
   | SessionNextRevertCleared
   | SessionNextRevertCommitted
@@ -2862,9 +2924,12 @@ export type V2Event =
   | MessagePartRemoved
   | SessionNextAgentSwitched
   | SessionNextModelSwitched
+  | SessionNextTitleUpdated
   | SessionNextMoved
   | SessionNextPrompted
   | SessionNextPromptAdmitted
+  | SessionNextProviderAttemptStarted
+  | SessionNextProviderAttemptEnded
   | SessionNextContextUpdated
   | SessionNextSynthetic
   | SessionNextShellStarted
@@ -2889,6 +2954,7 @@ export type V2Event =
   | SessionNextCompactionStarted
   | SessionNextCompactionDelta
   | SessionNextCompactionEnded
+  | SessionNextCompactionFailed
   | SessionNextRevertStaged
   | SessionNextRevertCleared
   | SessionNextRevertCommitted
@@ -3328,6 +3394,23 @@ export type SyncEventSessionNextModelSwitched = {
   }
 }
 
+export type SyncEventSessionNextTitleUpdated = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.title.updated.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      expected: string
+      title: string
+    }
+  }
+}
+
 export type SyncEventSessionNextMoved = {
   type: "sync"
   id: string
@@ -3377,6 +3460,40 @@ export type SyncEventSessionNextPromptAdmitted = {
       messageID: string
       prompt: Prompt
       delivery: "steer" | "queue"
+    }
+  }
+}
+
+export type SyncEventSessionNextProviderAttemptStarted = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.provider-attempt.started.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      attemptID: string
+      inputMessageIDs: Array<string>
+    }
+  }
+}
+
+export type SyncEventSessionNextProviderAttemptEnded = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.provider-attempt.ended.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      attemptID: string
+      outcome: "completed" | "failed" | "interrupted"
     }
   }
 }
@@ -3768,6 +3885,29 @@ export type SyncEventSessionNextCompactionEnded = {
       reason: "auto" | "manual"
       text: string
       recent: string
+      retainedMessageIDs?: Array<string>
+      continuation?: {
+        attemptID: string
+        inputMessageIDs: Array<string>
+      }
+    }
+  }
+}
+
+export type SyncEventSessionNextCompactionFailed = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.compaction.failed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      messageID: string
+      reason: "auto" | "manual"
+      failure: "provider-error" | "empty-summary" | "interrupted"
     }
   }
 }
@@ -3895,11 +4035,14 @@ export type AgentV2Info = {
   hidden: boolean
   color?: AgentColor
   steps?: number
+  tools?: boolean
+  workspaceInstructions?: boolean
   permissions: PermissionV2Ruleset
 }
 
 export type SessionV2Info = {
   id: string
+  purpose?: string
   parentID?: string
   projectID: string
   agent?: string
@@ -4139,6 +4282,7 @@ export type SessionMessageCompaction = {
   reason: "auto" | "manual"
   summary: string
   recent: string
+  retainedMessageIDs?: Array<string>
   id: string
   metadata?: {
     [key: string]: unknown
@@ -4195,6 +4339,26 @@ export type SessionNextModelSwitched = {
     sessionID: string
     messageID: string
     model: ModelRef
+  }
+}
+
+export type SessionNextTitleUpdated = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.title.updated"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    expected: string
+    title: string
   }
 }
 
@@ -4257,6 +4421,46 @@ export type SessionNextPromptAdmitted = {
     messageID: string
     prompt: Prompt
     delivery: "steer" | "queue"
+  }
+}
+
+export type SessionNextProviderAttemptStarted = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.provider-attempt.started"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    attemptID: string
+    inputMessageIDs: Array<string>
+  }
+}
+
+export type SessionNextProviderAttemptEnded = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.provider-attempt.ended"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    attemptID: string
+    outcome: "completed" | "failed" | "interrupted"
   }
 }
 
@@ -4708,6 +4912,32 @@ export type SessionNextCompactionEnded = {
     reason: "auto" | "manual"
     text: string
     recent: string
+    retainedMessageIDs?: Array<string>
+    continuation?: {
+      attemptID: string
+      inputMessageIDs: Array<string>
+    }
+  }
+}
+
+export type SessionNextCompactionFailed = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.compaction.failed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    reason: "auto" | "manual"
+    failure: "provider-error" | "empty-summary" | "interrupted"
   }
 }
 
@@ -6266,6 +6496,17 @@ export type EventSessionNextModelSwitched = {
   }
 }
 
+export type EventSessionNextTitleUpdated = {
+  id: string
+  type: "session.next.title.updated"
+  properties: {
+    timestamp: number
+    sessionID: string
+    expected: string
+    title: string
+  }
+}
+
 export type EventSessionNextMoved = {
   id: string
   type: "session.next.moved"
@@ -6298,6 +6539,28 @@ export type EventSessionNextPromptAdmitted = {
     messageID: string
     prompt: Prompt
     delivery: "steer" | "queue"
+  }
+}
+
+export type EventSessionNextProviderAttemptStarted = {
+  id: string
+  type: "session.next.provider-attempt.started"
+  properties: {
+    timestamp: number
+    sessionID: string
+    attemptID: string
+    inputMessageIDs: Array<string>
+  }
+}
+
+export type EventSessionNextProviderAttemptEnded = {
+  id: string
+  type: "session.next.provider-attempt.ended"
+  properties: {
+    timestamp: number
+    sessionID: string
+    attemptID: string
+    outcome: "completed" | "failed" | "interrupted"
   }
 }
 
@@ -6616,6 +6879,23 @@ export type EventSessionNextCompactionEnded = {
     reason: "auto" | "manual"
     text: string
     recent: string
+    retainedMessageIDs?: Array<string>
+    continuation?: {
+      attemptID: string
+      inputMessageIDs: Array<string>
+    }
+  }
+}
+
+export type EventSessionNextCompactionFailed = {
+  id: string
+  type: "session.next.compaction.failed"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    reason: "auto" | "manual"
+    failure: "provider-error" | "empty-summary" | "interrupted"
   }
 }
 
@@ -7204,6 +7484,10 @@ export type ExperimentalControlPlaneMoveSessionErrors = {
    * MoveSessionError | InvalidRequestError
    */
   400: MoveSessionError | InvalidRequestError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type ExperimentalControlPlaneMoveSessionError =
@@ -9559,6 +9843,10 @@ export type SessionDeleteErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionDeleteError = SessionDeleteErrors[keyof SessionDeleteErrors]
@@ -9636,6 +9924,10 @@ export type SessionUpdateErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionUpdateError = SessionUpdateErrors[keyof SessionUpdateErrors]
@@ -9823,6 +10115,10 @@ export type SessionPromptErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionPromptError = SessionPromptErrors[keyof SessionPromptErrors]
@@ -9865,6 +10161,10 @@ export type SessionDeleteMessageErrors = {
    * SessionBusyError
    */
   409: SessionBusyError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionDeleteMessageError = SessionDeleteMessageErrors[keyof SessionDeleteMessageErrors]
@@ -9939,6 +10239,10 @@ export type SessionForkErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionForkError = SessionForkErrors[keyof SessionForkErrors]
@@ -9969,6 +10273,14 @@ export type SessionAbortErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionAbortError = SessionAbortErrors[keyof SessionAbortErrors]
@@ -10007,6 +10319,10 @@ export type SessionInitErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionInitError = SessionInitErrors[keyof SessionInitErrors]
@@ -10045,6 +10361,10 @@ export type SessionUnshareErrors = {
    * InternalServerError
    */
   500: EffectHttpApiErrorInternalServerError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionUnshareError = SessionUnshareErrors[keyof SessionUnshareErrors]
@@ -10083,6 +10403,10 @@ export type SessionShareErrors = {
    * InternalServerError
    */
   500: EffectHttpApiErrorInternalServerError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionShareError = SessionShareErrors[keyof SessionShareErrors]
@@ -10121,6 +10445,10 @@ export type SessionSummarizeErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionSummarizeError = SessionSummarizeErrors[keyof SessionSummarizeErrors]
@@ -10170,6 +10498,10 @@ export type SessionPromptAsyncErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionPromptAsyncError = SessionPromptAsyncErrors[keyof SessionPromptAsyncErrors]
@@ -10219,6 +10551,10 @@ export type SessionCommandErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionCommandError = SessionCommandErrors[keyof SessionCommandErrors]
@@ -10268,6 +10604,10 @@ export type SessionShellErrors = {
    * SessionBusyError
    */
   409: SessionBusyError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionShellError = SessionShellErrors[keyof SessionShellErrors]
@@ -10312,6 +10652,10 @@ export type SessionRevertErrors = {
    * SessionBusyError
    */
   409: SessionBusyError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionRevertError = SessionRevertErrors[keyof SessionRevertErrors]
@@ -10350,6 +10694,10 @@ export type SessionUnrevertErrors = {
    * SessionBusyError
    */
   409: SessionBusyError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SessionUnrevertError = SessionUnrevertErrors[keyof SessionUnrevertErrors]
@@ -10387,6 +10735,10 @@ export type PermissionRespondErrors = {
    * NotFoundError | PermissionNotFoundError
    */
   404: NotFoundError | PermissionNotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type PermissionRespondError = PermissionRespondErrors[keyof PermissionRespondErrors]
@@ -10423,6 +10775,10 @@ export type PartDeleteErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type PartDeleteError = PartDeleteErrors[keyof PartDeleteErrors]
@@ -10459,6 +10815,10 @@ export type PartUpdateErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type PartUpdateError = PartUpdateErrors[keyof PartUpdateErrors]
@@ -10558,6 +10918,10 @@ export type SyncStealErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type SyncStealError = SyncStealErrors[keyof SyncStealErrors]
@@ -11209,6 +11573,10 @@ export type ExperimentalWorkspaceWarpErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type ExperimentalWorkspaceWarpError = ExperimentalWorkspaceWarpErrors[keyof ExperimentalWorkspaceWarpErrors]
@@ -11330,6 +11698,7 @@ export type V2SessionListData = {
   path?: never
   query?: {
     workspace?: string
+    purpose?: string
     limit?: number
     order?: "asc" | "desc"
     search?: string
@@ -11369,6 +11738,7 @@ export type V2SessionListResponse = V2SessionListResponses[keyof V2SessionListRe
 export type V2SessionCreateData = {
   body: {
     id?: string
+    purpose?: string
     agent?: string
     model?: ModelRef
     location?: LocationRef
@@ -11387,6 +11757,10 @@ export type V2SessionCreateErrors = {
    * UnauthorizedError
    */
   401: UnauthorizedError
+  /**
+   * ConflictError
+   */
+  409: ConflictError
 }
 
 export type V2SessionCreateError = V2SessionCreateErrors[keyof V2SessionCreateErrors]
@@ -11401,6 +11775,95 @@ export type V2SessionCreateResponses = {
 }
 
 export type V2SessionCreateResponse = V2SessionCreateResponses[keyof V2SessionCreateResponses]
+
+export type V2SessionCompareAndSetTitleData = {
+  body: {
+    expected: string
+    title: string
+  }
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/title"
+}
+
+export type V2SessionCompareAndSetTitleErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+}
+
+export type V2SessionCompareAndSetTitleError =
+  V2SessionCompareAndSetTitleErrors[keyof V2SessionCompareAndSetTitleErrors]
+
+export type V2SessionCompareAndSetTitleResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: {
+      updated: boolean
+    }
+  }
+}
+
+export type V2SessionCompareAndSetTitleResponse =
+  V2SessionCompareAndSetTitleResponses[keyof V2SessionCompareAndSetTitleResponses]
+
+export type V2SessionEnsureTitleData = {
+  body: {
+    firstMessageID: string
+  }
+  path: {
+    sessionID: string
+  }
+  query?: never
+  url: "/api/session/{sessionID}/title/ensure"
+}
+
+export type V2SessionEnsureTitleErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
+}
+
+export type V2SessionEnsureTitleError = V2SessionEnsureTitleErrors[keyof V2SessionEnsureTitleErrors]
+
+export type V2SessionEnsureTitleResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: {
+      title: string
+    }
+  }
+}
+
+export type V2SessionEnsureTitleResponse = V2SessionEnsureTitleResponses[keyof V2SessionEnsureTitleResponses]
 
 export type V2SessionActiveData = {
   body?: never
@@ -11472,6 +11935,56 @@ export type V2SessionGetResponses = {
 
 export type V2SessionGetResponse = V2SessionGetResponses[keyof V2SessionGetResponses]
 
+export type V2SessionRecoveryData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    messageID?: string
+  }
+  url: "/api/session/{sessionID}/recovery"
+}
+
+export type V2SessionRecoveryErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+  /**
+   * UnknownError
+   */
+  500: UnknownError1
+}
+
+export type V2SessionRecoveryError = V2SessionRecoveryErrors[keyof V2SessionRecoveryErrors]
+
+export type V2SessionRecoveryResponses = {
+  /**
+   * Success
+   */
+  200: {
+    data: {
+      unfinishedProviderAttempt: boolean
+      unfinishedCompaction: boolean
+      unresolvedInput: boolean
+      attemptedUnsettledInput: boolean
+      requestedInputStatus: "not-requested" | "absent" | "unattempted" | "attempted" | "settled"
+      otherUnresolvedInput: boolean
+    }
+  }
+}
+
+export type V2SessionRecoveryResponse = V2SessionRecoveryResponses[keyof V2SessionRecoveryResponses]
+
 export type V2SessionSwitchAgentData = {
   body: {
     agent: string
@@ -11496,6 +12009,10 @@ export type V2SessionSwitchAgentErrors = {
    * SessionNotFoundError
    */
   404: SessionNotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type V2SessionSwitchAgentError = V2SessionSwitchAgentErrors[keyof V2SessionSwitchAgentErrors]
@@ -11533,6 +12050,10 @@ export type V2SessionSwitchModelErrors = {
    * SessionNotFoundError
    */
   404: SessionNotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type V2SessionSwitchModelError = V2SessionSwitchModelErrors[keyof V2SessionSwitchModelErrors]
@@ -11699,6 +12220,10 @@ export type V2SessionRevertStageErrors = {
    * UnknownError
    */
   500: UnknownError1
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type V2SessionRevertStageError = V2SessionRevertStageErrors[keyof V2SessionRevertStageErrors]
@@ -11740,6 +12265,10 @@ export type V2SessionRevertClearErrors = {
    * UnknownError
    */
   500: UnknownError1
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type V2SessionRevertClearError = V2SessionRevertClearErrors[keyof V2SessionRevertClearErrors]
@@ -11775,6 +12304,10 @@ export type V2SessionRevertCommitErrors = {
    * SessionNotFoundError
    */
   404: SessionNotFoundError
+  /**
+   * ServiceUnavailableError
+   */
+  503: ServiceUnavailableError
 }
 
 export type V2SessionRevertCommitError = V2SessionRevertCommitErrors[keyof V2SessionRevertCommitErrors]

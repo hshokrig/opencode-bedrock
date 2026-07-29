@@ -49,6 +49,14 @@ export type ServiceUnavailableError = {
 export const isServiceUnavailableError = (value: unknown): value is ServiceUnavailableError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ServiceUnavailableError"
 
+export type UnknownError = {
+  readonly _tag: "UnknownError"
+  readonly message: string
+  readonly ref?: string | undefined
+}
+export const isUnknownError = (value: unknown): value is UnknownError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "UnknownError"
+
 export type MessageNotFoundError = {
   readonly _tag: "MessageNotFoundError"
   readonly sessionID: string
@@ -57,14 +65,6 @@ export type MessageNotFoundError = {
 }
 export const isMessageNotFoundError = (value: unknown): value is MessageNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "MessageNotFoundError"
-
-export type UnknownError = {
-  readonly _tag: "UnknownError"
-  readonly message: string
-  readonly ref?: string | undefined
-}
-export const isUnknownError = (value: unknown): value is UnknownError =>
-  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "UnknownError"
 
 export type ProviderNotFoundError = {
   readonly _tag: "ProviderNotFoundError"
@@ -415,6 +415,22 @@ export type SessionsGetOutput = {
   }
 }["data"]
 
+export type SessionsRecoveryInput = {
+  readonly sessionID: { readonly sessionID: string }["sessionID"]
+  readonly messageID?: { readonly messageID?: string | undefined }["messageID"]
+}
+
+export type SessionsRecoveryOutput = {
+  readonly data: {
+    readonly unfinishedProviderAttempt: boolean
+    readonly unfinishedCompaction: boolean
+    readonly unresolvedInput: boolean
+    readonly attemptedUnsettledInput: boolean
+    readonly requestedInputStatus: "not-requested" | "absent" | "unattempted" | "attempted" | "settled"
+    readonly otherUnresolvedInput: boolean
+  }
+}["data"]
+
 export type SessionsSwitchAgentInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]
   readonly agent: { readonly agent: string }["agent"]
@@ -719,6 +735,7 @@ export type SessionsContextOutput = {
         readonly reason: "auto" | "manual"
         readonly summary: string
         readonly recent: string
+        readonly retainedMessageIDs?: ReadonlyArray<string>
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly time: { readonly created: number }
@@ -1179,6 +1196,8 @@ export type SessionsHistoryOutput = {
           readonly reason: "auto" | "manual"
           readonly text: string
           readonly recent: string
+          readonly retainedMessageIDs?: ReadonlyArray<string>
+          readonly continuation?: { readonly attemptID: string; readonly inputMessageIDs: ReadonlyArray<string> }
         }
       }
     | {
@@ -1690,6 +1709,8 @@ export type SessionsEventsOutput =
         readonly reason: "auto" | "manual"
         readonly text: string
         readonly recent: string
+        readonly retainedMessageIDs?: ReadonlyArray<string>
+        readonly continuation?: { readonly attemptID: string; readonly inputMessageIDs: ReadonlyArray<string> }
       }
     }
   | {
@@ -1903,6 +1924,7 @@ export type SessionsMessageOutput = {
         readonly reason: "auto" | "manual"
         readonly summary: string
         readonly recent: string
+        readonly retainedMessageIDs?: ReadonlyArray<string>
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly time: { readonly created: number }
@@ -2075,6 +2097,7 @@ export type MessagesListOutput = {
         readonly reason: "auto" | "manual"
         readonly summary: string
         readonly recent: string
+        readonly retainedMessageIDs?: ReadonlyArray<string>
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
         readonly time: { readonly created: number }

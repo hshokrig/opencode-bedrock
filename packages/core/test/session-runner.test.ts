@@ -56,7 +56,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { Location } from "@opencode-ai/core/location"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
-import { asc, eq } from "drizzle-orm"
+import { and, asc, eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 
 const requests: LLMRequest[] = []
@@ -218,7 +218,7 @@ const config = Layer.succeed(
           info: new Config.Info({
             compaction: new ConfigCompaction.Info({
               buffer: 3_000,
-              keep: new ConfigCompaction.Keep({ tokens: 1_000 }),
+              keep: new ConfigCompaction.Keep({ tokens: 1_000, turns: 10 }),
             }),
           }),
         }),
@@ -357,6 +357,15 @@ const setupOverflowRecovery = Effect.gen(function* () {
     resume: false,
   })
   yield* session.resume(sessionID)
+  for (let index = 2; index <= 11; index++) {
+    response = fragmentFixture("text", `text-earlier-${index}`, [`Earlier answer ${index}`]).completeEvents
+    yield* session.prompt({
+      sessionID,
+      prompt: Prompt.make({ text: `Earlier question ${index}` }),
+      resume: false,
+    })
+    yield* session.resume(sessionID)
+  }
   currentModel = recoveryModel
   requests.length = 0
   return session
@@ -609,6 +618,11 @@ describe("SessionRunnerLLM", () => {
             },
           ],
         },
+        {
+          type: "assistant",
+          finish: "error",
+          error: { message: "Provider stream ended without an assistant response" },
+        },
       ])
     }),
   )
@@ -627,6 +641,7 @@ describe("SessionRunnerLLM", () => {
 
       expect(requests).toHaveLength(1)
       expect(yield* session.messages({ sessionID })).toMatchObject([
+        { type: "assistant", finish: "error" },
         { id: message.id, type: "user", text: "Run automatically" },
       ])
     }),
@@ -653,7 +668,7 @@ describe("SessionRunnerLLM", () => {
         { role: "user", content: [{ type: "text", text: "First" }] },
         { role: "user", content: [{ type: "text", text: "Second" }] },
       ])
-      expect(yield* session.messages({ sessionID })).toHaveLength(2)
+      expect(yield* session.messages({ sessionID })).toHaveLength(3)
       const attempts = (yield* session.history({ sessionID, limit: 100 })).events.filter((event) =>
         event.type.startsWith("session.next.provider-attempt."),
       )
@@ -684,7 +699,19 @@ describe("SessionRunnerLLM", () => {
         attemptID: "attempt_unknown",
         inputMessageIDs: [],
       })
-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Wait for recovery" }), resume: false })
+      const message = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Wait for recovery" }),
+        resume: false,
+      })
+      expect(yield* session.recovery({ sessionID, messageID: message.id })).toMatchObject({
+        unfinishedProviderAttempt: true,
+        unfinishedCompaction: false,
+        unresolvedInput: true,
+        attemptedUnsettledInput: false,
+        requestedInputStatus: "unattempted",
+        otherUnresolvedInput: false,
+      })
 
       requests.length = 0
       yield* session.resume(sessionID)
@@ -704,6 +731,254 @@ describe("SessionRunnerLLM", () => {
         { type: "user", text: "Wait for recovery" },
         { type: "assistant", finish: "stop" },
       ])
+      expect(yield* session.recovery({ sessionID, messageID: message.id })).toMatchObject({
+        unfinishedProviderAttempt: false,
+        unresolvedInput: false,
+        requestedInputStatus: "settled",
+        otherUnresolvedInput: false,
+      })
+    }),
+  )
+
+  it.effect("does not replay an input whose provider attempt ended without a terminal assistant", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const message = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Do not replay this input" }),
+        resume: false,
+      })
+      yield* SessionInput.promoteSteers(db, events, sessionID, yield* EventV2.latestSequence(db, sessionID))
+      yield* events.publish(SessionEvent.ProviderAttemptStarted, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(1),
+        attemptID: "attempt_crashed",
+        inputMessageIDs: [message.id],
+      })
+      yield* events.publish(SessionEvent.ProviderAttemptEnded, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(2),
+        attemptID: "attempt_crashed",
+        outcome: "failed",
+      })
+
+      expect(yield* session.recovery({ sessionID, messageID: message.id })).toMatchObject({
+        unfinishedProviderAttempt: false,
+        unresolvedInput: true,
+        attemptedUnsettledInput: true,
+        requestedInputStatus: "attempted",
+        otherUnresolvedInput: false,
+      })
+      requests.length = 0
+      yield* session.resume(sessionID)
+      expect(requests).toHaveLength(0)
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "user", id: message.id, text: "Do not replay this input" },
+      ])
+      const later = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Do not absorb this later input" }),
+        resume: false,
+      })
+      yield* session.resume(sessionID)
+      expect(requests).toHaveLength(0)
+      expect((yield* SessionInput.find(db, later.id))?.promotedSeq).toBeUndefined()
+    }),
+  )
+
+  it.effect("does not infer continuation permission from a generic completed compaction", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const message = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Do not replay after manual compaction" }),
+        resume: false,
+      })
+      yield* SessionInput.promoteSteers(db, events, sessionID, yield* EventV2.latestSequence(db, sessionID))
+      yield* events.publish(SessionEvent.ProviderAttemptStarted, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(1),
+        attemptID: "attempt_before_manual_compaction",
+        inputMessageIDs: [message.id],
+      })
+      yield* events.publish(SessionEvent.ProviderAttemptEnded, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(2),
+        attemptID: "attempt_before_manual_compaction",
+        outcome: "failed",
+      })
+      const compactionID = SessionMessage.ID.create()
+      yield* events.publish(SessionEvent.Compaction.Started, {
+        sessionID,
+        messageID: compactionID,
+        timestamp: DateTime.makeUnsafe(3),
+        reason: "manual",
+      })
+      yield* events.publish(SessionEvent.Compaction.Ended, {
+        sessionID,
+        messageID: compactionID,
+        timestamp: DateTime.makeUnsafe(4),
+        reason: "manual",
+        text: "Generic summary",
+        recent: "",
+      })
+
+      requests.length = 0
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(0)
+      expect(yield* session.recovery({ sessionID, messageID: message.id })).toMatchObject({
+        attemptedUnsettledInput: true,
+        requestedInputStatus: "attempted",
+      })
+    }),
+  )
+
+  it.effect("treats a durable terminal assistant as settlement when attempt ending was lost", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const { db } = yield* Database.Service
+      response = fragmentFixture("text", "text-settled-before-crash", ["Settled"]).completeEvents
+      const settled = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Settle exactly once" }),
+        resume: false,
+      })
+      yield* session.resume(sessionID)
+      yield* db
+        .delete(EventTable)
+        .where(
+          and(
+            eq(EventTable.aggregate_id, sessionID),
+            eq(EventTable.type, EventV2.versionedType(SessionEvent.ProviderAttemptEnded.type, 1)),
+          ),
+        )
+        .run()
+        .pipe(Effect.orDie)
+      yield* replaySessionProjection(sessionID)
+
+      expect(yield* session.recovery({ sessionID, messageID: settled.id })).toMatchObject({
+        unfinishedProviderAttempt: false,
+        attemptedUnsettledInput: false,
+        requestedInputStatus: "settled",
+      })
+
+      response = fragmentFixture("text", "text-after-crash", ["Later"]).completeEvents
+      const later = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Run after recovery" }),
+        resume: false,
+      })
+      requests.length = 0
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(1)
+      const attempts = (yield* session.history({ sessionID, limit: 100 })).events.filter(
+        (event) => event.type === "session.next.provider-attempt.started",
+      )
+      expect(attempts.at(-1)?.data.inputMessageIDs).toEqual([later.id])
+      expect(attempts.at(-1)?.data.inputMessageIDs).not.toContain(settled.id)
+    }),
+  )
+
+  it.effect("retains the exact promoted input across a crash after compaction ended", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const message = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Preserve my exact identity" }),
+        resume: false,
+      })
+      yield* SessionInput.promoteSteers(db, events, sessionID, yield* EventV2.latestSequence(db, sessionID))
+      const compactionID = SessionMessage.ID.create()
+      yield* events.publish(SessionEvent.Compaction.Started, {
+        sessionID,
+        messageID: compactionID,
+        timestamp: DateTime.makeUnsafe(1),
+        reason: "auto",
+      })
+      yield* events.publish(SessionEvent.Compaction.Ended, {
+        sessionID,
+        messageID: compactionID,
+        timestamp: DateTime.makeUnsafe(2),
+        reason: "auto",
+        text: "Earlier history",
+        recent: "[User]: this fallback must not replace the durable message",
+        retainedMessageIDs: [message.id],
+      })
+
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "compaction", retainedMessageIDs: [message.id] },
+        { type: "user", id: message.id, text: "Preserve my exact identity" },
+      ])
+      expect(yield* session.recovery({ sessionID, messageID: message.id })).toMatchObject({
+        unfinishedCompaction: false,
+        unresolvedInput: true,
+        attemptedUnsettledInput: false,
+        requestedInputStatus: "unattempted",
+        otherUnresolvedInput: false,
+      })
+      yield* replaySessionProjection(sessionID)
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "compaction", retainedMessageIDs: [message.id] },
+        { type: "user", id: message.id, text: "Preserve my exact identity" },
+      ])
+    }),
+  )
+
+  it.effect("treats corrupt provider attempt inputs as attempted while the turn is unresolved", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const message = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Never replay after corrupt attempt metadata" }),
+        resume: false,
+      })
+      yield* SessionInput.promoteSteers(db, events, sessionID, yield* EventV2.latestSequence(db, sessionID))
+      yield* events.publish(SessionEvent.ProviderAttemptStarted, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(1),
+        attemptID: "attempt_corrupt",
+        inputMessageIDs: [message.id],
+      })
+      yield* events.publish(SessionEvent.ProviderAttemptEnded, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(2),
+        attemptID: "attempt_corrupt",
+        outcome: "failed",
+      })
+      yield* db
+        .update(EventTable)
+        .set({ data: { inputMessageIDs: "corrupt" } })
+        .where(
+          and(
+            eq(EventTable.aggregate_id, sessionID),
+            eq(EventTable.type, EventV2.versionedType(SessionEvent.ProviderAttemptStarted.type, 1)),
+          ),
+        )
+
+      expect(yield* session.recovery({ sessionID, messageID: message.id })).toMatchObject({
+        unfinishedProviderAttempt: false,
+        unresolvedInput: true,
+        attemptedUnsettledInput: true,
+        requestedInputStatus: "attempted",
+      })
+      requests.length = 0
+      yield* session.resume(sessionID)
+      expect(requests).toHaveLength(0)
     }),
   )
 
@@ -816,7 +1091,7 @@ describe("SessionRunnerLLM", () => {
       ])
       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
       expect(requests[1]?.messages.at(-1)?.content).toEqual([{ type: "text", text: "Changed context" }])
-      expect(yield* session.messages({ sessionID })).toHaveLength(3)
+      expect(yield* session.messages({ sessionID })).toHaveLength(5)
       const { db } = yield* Database.Service
       expect(
         yield* db
@@ -827,7 +1102,7 @@ describe("SessionRunnerLLM", () => {
           .pipe(Effect.orDie),
       ).toHaveLength(1)
       yield* replaySessionProjection(sessionID)
-      expect(yield* session.messages({ sessionID })).toHaveLength(3)
+      expect(yield* session.messages({ sessionID })).toHaveLength(5)
     }),
   )
 
@@ -1059,7 +1334,7 @@ describe("SessionRunnerLLM", () => {
       expect(requests[1]?.messages.at(-1)?.content).toEqual([
         { type: "text", text: "System context source removed: test/context" },
       ])
-      expect(yield* session.messages({ sessionID })).toHaveLength(3)
+      expect(yield* session.messages({ sessionID })).toHaveLength(5)
     }),
   )
 
@@ -1095,14 +1370,17 @@ describe("SessionRunnerLLM", () => {
       expect(requests[2]?.messages.filter((message) => message.role === "system")).toHaveLength(2)
       expect((yield* session.context(sessionID)).map((message) => message.type)).toEqual([
         "user",
+        "assistant",
         "user",
         "system",
+        "assistant",
         "model-switched",
         "user",
         "system",
+        "assistant",
       ])
       yield* replaySessionProjection(sessionID)
-      expect(yield* session.messages({ sessionID })).toHaveLength(6)
+      expect(yield* session.messages({ sessionID })).toHaveLength(9)
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Fourth" }), resume: false })
       yield* session.resume(sessionID)
     }),
@@ -1190,6 +1468,15 @@ describe("SessionRunnerLLM", () => {
         resume: false,
       })
       yield* session.resume(sessionID)
+      for (let index = 2; index <= 11; index++) {
+        response = fragmentFixture("text", `text-earlier-${index}`, [`Earlier answer ${index}`]).completeEvents
+        yield* session.prompt({
+          sessionID,
+          prompt: Prompt.make({ text: `Earlier question ${index}` }),
+          resume: false,
+        })
+        yield* session.resume(sessionID)
+      }
 
       currentModel = compactModel
       requests.length = 0
@@ -1197,7 +1484,7 @@ describe("SessionRunnerLLM", () => {
         fragmentFixture("text", "text-summary", ["## Objective\n- Preserve the task"]).completeEvents,
         fragmentFixture("text", "text-final", ["Continued"]).completeEvents,
       ]
-      yield* session.prompt({
+      const recent = yield* session.prompt({
         sessionID,
         prompt: Prompt.make({ text: "Recent exact request ".repeat(180) }),
         resume: false,
@@ -1207,16 +1494,19 @@ describe("SessionRunnerLLM", () => {
       expect(requests).toHaveLength(2)
       expect(requests[1]?.generation?.maxTokens).toBe(50)
       expect(userTexts(requests[0])[0]).toContain("## Objective")
-      expect(userTexts(requests[1])).toHaveLength(1)
       expect(userTexts(requests[1])[0]).toContain("<summary>\n## Objective\n- Preserve the task\n</summary>")
-      expect(userTexts(requests[1])[0]).toContain(`[User]: ${"Recent exact request ".repeat(180)}`)
+      expect(userTexts(requests[1]).slice(1)).toEqual([
+        ...Array.from({ length: 10 }, (_, index) => `Earlier question ${index + 2}`),
+        "Recent exact request ".repeat(180),
+      ])
 
       const context = yield* (yield* SessionStore.Service).context(sessionID)
-      expect(context.map((message) => message.type)).toEqual(["compaction", "assistant"])
       expect(context[0]).toMatchObject({
         type: "compaction",
         summary: "## Objective\n- Preserve the task",
       })
+      expect(context.at(-2)).toMatchObject({ type: "user", id: recent.id, text: recent.prompt.text })
+      expect(context.at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
 
       requests.length = 0
       executions.length = 0
@@ -1224,7 +1514,7 @@ describe("SessionRunnerLLM", () => {
         fragmentFixture("text", "text-summary-2", ["## Objective\n- Preserve the updated task"]).completeEvents,
         fragmentFixture("text", "text-final-2", ["Continued again"]).completeEvents,
       ]
-      yield* session.prompt({
+      const newest = yield* session.prompt({
         sessionID,
         prompt: Prompt.make({ text: "Newest exact request ".repeat(180) }),
         resume: false,
@@ -1235,13 +1525,80 @@ describe("SessionRunnerLLM", () => {
       expect(userTexts(requests[0])[0]).toContain(
         "<previous-summary>\n## Objective\n- Preserve the task\n</previous-summary>",
       )
-      expect(userTexts(requests[0])[0]).toContain("Recent exact request")
-      expect((yield* (yield* SessionStore.Service).context(sessionID))[0]).toMatchObject({
+      expect(userTexts(requests[0])[0]).toContain("[User]: Earlier question 2")
+      expect(userTexts(requests[0])[0]).not.toContain("Recent exact request")
+      expect(userTexts(requests[1]).slice(1)).toEqual([
+        "Earlier question 9",
+        "Earlier question 10",
+        "Earlier question 11",
+        recent.prompt.text,
+        newest.prompt.text,
+      ])
+      const repeatedContext = yield* (yield* SessionStore.Service).context(sessionID)
+      expect(repeatedContext[0]).toMatchObject({
         type: "compaction",
         summary: "## Objective\n- Preserve the updated task",
       })
+      expect(repeatedContext.flatMap((message) => (message.type === "user" ? [message.id] : []))).toEqual(
+        expect.arrayContaining([recent.id, newest.id]),
+      )
     }),
   )
+
+  for (const completedTurns of [9, 10, 11]) {
+    it.effect(
+      `retains the newest complete turns atomically with ${completedTurns} completed turns and pending input`,
+      () =>
+        Effect.gen(function* () {
+          yield* setup
+          const id = SessionV2.ID.make(`ses_compaction_${completedTurns}`)
+          yield* insertSession(id)
+          const session = yield* SessionV2.Service
+          for (let index = 1; index <= completedTurns; index++) {
+            response = fragmentFixture("text", `text-turn-${completedTurns}-${index}`, [
+              `Answer ${index}`,
+            ]).completeEvents
+            yield* session.prompt({
+              sessionID: id,
+              prompt: Prompt.make({ text: `Question ${index}` }),
+              resume: false,
+            })
+            yield* session.resume(id)
+          }
+
+          currentModel = compactModel
+          requests.length = 0
+          responses =
+            completedTurns < 11
+              ? [fragmentFixture("text", `text-pending-${completedTurns}`, ["Continued"]).completeEvents]
+              : [
+                  fragmentFixture("text", "text-turn-summary", ["## Objective\n- Keep recent turns"]).completeEvents,
+                  fragmentFixture("text", "text-pending-11", ["Continued"]).completeEvents,
+                ]
+          yield* session.prompt({
+            sessionID: id,
+            prompt: Prompt.make({ text: "Pending current input ".repeat(240) }),
+            resume: false,
+          })
+          yield* session.resume(id)
+
+          if (completedTurns < 11) {
+            expect(requests).toHaveLength(1)
+            expect((yield* session.context(id)).some((message) => message.type === "compaction")).toBe(false)
+            return
+          }
+
+          expect(requests).toHaveLength(2)
+          expect(userTexts(requests[0])[0]).toContain("[User]: Question 1\n\n[Assistant]: Answer 1")
+          const [checkpoint, ...retained] = userTexts(requests[1])
+          expect(checkpoint).not.toContain("[User]: Question 1\n")
+          expect(retained).toEqual([
+            ...Array.from({ length: 10 }, (_, index) => `Question ${index + 2}`),
+            "Pending current input ".repeat(240),
+          ])
+        }),
+    )
+  }
 
   it.effect("forces one compaction and retries after provider context overflow", () =>
     Effect.gen(function* () {
@@ -1254,21 +1611,109 @@ describe("SessionRunnerLLM", () => {
         fragmentFixture("text", "text-summary", ["## Objective\n- Recover overflow"]).completeEvents,
         fragmentFixture("text", "text-final", ["Recovered"]).completeEvents,
       ]
-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue" }), resume: false })
+      const message = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Continue" }),
+        resume: false,
+      })
       yield* session.resume(sessionID)
 
       expect(requests).toHaveLength(3)
+      const lifecycles = (yield* session.history({ sessionID, limit: 100 })).events
+        .filter(
+          (event) =>
+            event.type.startsWith("session.next.provider-attempt.") ||
+            event.type.startsWith("session.next.compaction."),
+        )
+        .slice(-6)
+        .map((event) => event.type)
+      expect(lifecycles.slice(0, 4)).toEqual([
+        "session.next.provider-attempt.started",
+        "session.next.compaction.started",
+        "session.next.provider-attempt.ended",
+        "session.next.compaction.ended",
+      ])
       expect(userTexts(requests[1])[0]).toContain("## Objective")
       expect(userTexts(requests[2])[0]).toContain("<summary>\n## Objective\n- Recover overflow\n</summary>")
-      expect(yield* session.context(sessionID)).toMatchObject([
-        { type: "compaction", summary: "## Objective\n- Recover overflow" },
-        { type: "assistant", finish: "stop" },
-      ])
+      const context = yield* session.context(sessionID)
+      expect(context[0]).toMatchObject({ type: "compaction", summary: "## Objective\n- Recover overflow" })
+      expect(context.find((item) => item.id === message.id)).toMatchObject({
+        type: "user",
+        id: message.id,
+        text: "Continue",
+      })
+      expect(context.at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
       yield* replaySessionProjection(sessionID)
-      expect(yield* session.context(sessionID)).toMatchObject([
-        { type: "compaction" },
-        { type: "assistant", finish: "stop" },
-      ])
+      const replayed = yield* session.context(sessionID)
+      expect(replayed[0]).toMatchObject({ type: "compaction" })
+      expect(replayed.find((item) => item.id === message.id)).toMatchObject({ type: "user", id: message.id })
+      expect(replayed.at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
+    }),
+  )
+
+  it.effect("resumes one exact continuation after restart immediately after overflow compaction", () =>
+    Effect.gen(function* () {
+      const session = yield* setupOverflowRecovery
+      const runner = yield* SessionRunner.Service
+      responses = [
+        [LLMEvent.providerError({ message: "prompt too long", classification: "context-overflow" })],
+        fragmentFixture("text", "text-restart-summary", ["## Objective\n- Resume once"]).completeEvents,
+        fragmentFixture("text", "text-restart-final", ["Recovered once"]).completeEvents,
+      ]
+      const message = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Continue exactly once" }),
+        resume: false,
+      })
+      const continuationStarted = yield* Deferred.make<void>()
+      let resolutions = 0
+      modelResolveHook = Effect.suspend(() => {
+        resolutions++
+        if (resolutions !== 2) return Effect.void
+        return Deferred.succeed(continuationStarted, undefined).pipe(Effect.andThen(Effect.never))
+      })
+
+      const interrupted = yield* runner.run({ sessionID, force: true }).pipe(Effect.forkChild)
+      yield* Deferred.await(continuationStarted)
+      yield* Fiber.interrupt(interrupted)
+      modelResolveHook = Effect.void
+      expect(requests).toHaveLength(2)
+
+      const history = (yield* session.history({ sessionID, limit: 100 })).events
+      const source = history.findLast((event) => event.type === "session.next.provider-attempt.started")
+      const ended = history.findLast((event) => event.type === "session.next.compaction.ended")
+      expect(ended).toMatchObject({
+        data: {
+          continuation: {
+            attemptID: source?.type === "session.next.provider-attempt.started" ? source.data.attemptID : "",
+            inputMessageIDs: [message.id],
+          },
+        },
+      })
+      expect(yield* session.recovery({ sessionID, messageID: message.id })).toMatchObject({
+        unfinishedProviderAttempt: false,
+        unfinishedCompaction: false,
+        unresolvedInput: true,
+        attemptedUnsettledInput: false,
+        requestedInputStatus: "unattempted",
+        otherUnresolvedInput: false,
+      })
+      expect(yield* session.recovery({ sessionID })).toMatchObject({
+        attemptedUnsettledInput: true,
+        requestedInputStatus: "not-requested",
+      })
+
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(3)
+      const attempts = (yield* session.history({ sessionID, limit: 100 })).events.filter(
+        (event) => event.type === "session.next.provider-attempt.started",
+      )
+      expect(attempts.slice(-2).map((event) => event.data.inputMessageIDs)).toEqual([[message.id], [message.id]])
+      const context = yield* session.context(sessionID)
+      expect(context[0]).toMatchObject({ type: "compaction" })
+      expect(context.find((item) => item.id === message.id)).toMatchObject({ id: message.id, type: "user" })
+      expect(context.at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
     }),
   )
 
@@ -1298,6 +1743,91 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
+  it.effect("rejects an oversized current input before summarizing completed history", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      response = fragmentFixture("text", "text-earlier", ["Earlier answer"]).completeEvents
+      yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Earlier completed question ".repeat(180) }),
+        resume: false,
+      })
+      yield* session.resume(sessionID)
+
+      currentModel = compactModel
+      yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Irreducibly oversized current input ".repeat(2_000) }),
+        resume: false,
+      })
+      requests.length = 0
+      responses = [
+        fragmentFixture("text", "text-summary-unused", ["This summary must not run"]).completeEvents,
+        fragmentFixture("text", "text-answer-unused", ["This answer must not run"]).completeEvents,
+      ]
+
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(0)
+      expect((yield* session.context(sessionID)).at(-1)).toMatchObject({
+        type: "assistant",
+        finish: "error",
+        error: { message: "The admitted input cannot fit within this Session's context limit" },
+      })
+      expect(
+        (yield* session.history({ sessionID, limit: 100 })).events.some((event) =>
+          event.type.startsWith("session.next.compaction."),
+        ),
+      ).toBe(false)
+    }),
+  )
+
+  it.effect("rejects escape-heavy retained input before paying for a summary", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const escapeHeavy = "\u0000".repeat(2_000)
+      response = fragmentFixture("text", "text-measure", ["Measured"]).completeEvents
+      yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: escapeHeavy }),
+        resume: false,
+      })
+      yield* session.resume(sessionID)
+      const measured = requests.at(-1)
+      if (!measured) return yield* Effect.die("Measurement request was not captured")
+      const measuredTokens = Math.round(
+        JSON.stringify({ system: measured.system, messages: measured.messages, tools: measured.tools }).length / 4,
+      )
+
+      const id = SessionV2.ID.make("ses_escape_budget")
+      yield* insertSession(id)
+      currentModel = Model.make({
+        id: "escape-budget",
+        provider: "fake",
+        route: OpenAIChat.route.with({ limits: { context: measuredTokens + 60, output: 50 } }),
+      })
+      yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: escapeHeavy }), resume: false })
+      requests.length = 0
+      response = fragmentFixture("text", "text-summary-unused", ["This summary must not run"]).completeEvents
+
+      yield* session.resume(id)
+
+      expect(requests).toHaveLength(0)
+      expect((yield* session.context(id)).at(-1)).toMatchObject({
+        type: "assistant",
+        finish: "error",
+        error: { message: "The admitted input cannot fit within this Session's context limit" },
+      })
+      expect(
+        (yield* session.history({ sessionID: id, limit: 100 })).events.some((event) =>
+          event.type.startsWith("session.next.compaction."),
+        ),
+      ).toBe(false)
+    }),
+  )
+
   it.effect("persists a second context overflow after one recovery", () =>
     Effect.gen(function* () {
       const session = yield* setupOverflowRecovery
@@ -1310,14 +1840,22 @@ describe("SessionRunnerLLM", () => {
         fragmentFixture("text", "text-summary", ["## Objective\n- Recover once"]).completeEvents,
         overflow(),
       ]
-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue" }), resume: false })
+      const message = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Continue" }),
+        resume: false,
+      })
       yield* session.resume(sessionID)
 
       expect(requests).toHaveLength(3)
-      expect(yield* session.context(sessionID)).toMatchObject([
-        { type: "compaction" },
-        { type: "assistant", finish: "error", error: { message: "prompt too long" } },
-      ])
+      const context = yield* session.context(sessionID)
+      expect(context[0]).toMatchObject({ type: "compaction" })
+      expect(context.find((item) => item.id === message.id)).toMatchObject({ type: "user", id: message.id })
+      expect(context.at(-1)).toMatchObject({
+        type: "assistant",
+        finish: "error",
+        error: { message: "prompt too long" },
+      })
     }),
   )
 
@@ -1338,14 +1876,18 @@ describe("SessionRunnerLLM", () => {
         fragmentFixture("text", "text-summary", ["## Objective\n- Recover raw overflow"]).completeEvents,
         fragmentFixture("text", "text-final", ["Recovered"]).completeEvents,
       ]
-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue" }), resume: false })
+      const message = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Continue" }),
+        resume: false,
+      })
       yield* session.resume(sessionID)
 
       expect(requests).toHaveLength(3)
-      expect(yield* session.context(sessionID)).toMatchObject([
-        { type: "compaction", summary: "## Objective\n- Recover raw overflow" },
-        { type: "assistant", finish: "stop" },
-      ])
+      const context = yield* session.context(sessionID)
+      expect(context[0]).toMatchObject({ type: "compaction", summary: "## Objective\n- Recover raw overflow" })
+      expect(context.find((item) => item.id === message.id)).toMatchObject({ type: "user", id: message.id })
+      expect(context.at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
     }),
   )
 
@@ -1368,8 +1910,7 @@ describe("SessionRunnerLLM", () => {
       ])
       expect(
         (yield* session.history({ sessionID, limit: 100 })).events.some(
-          (event) =>
-            event.type === "session.next.compaction.failed" && event.data.failure === "provider-error",
+          (event) => event.type === "session.next.compaction.failed" && event.data.failure === "provider-error",
         ),
       ).toBe(true)
     }),
@@ -1397,6 +1938,61 @@ describe("SessionRunnerLLM", () => {
       streamGate = undefined
       expect(requests).toHaveLength(2)
       expect((yield* session.context(sessionID)).some((message) => message.type === "compaction")).toBe(false)
+      const history = (yield* session.history({ sessionID, limit: 100 })).events
+      const compactions = history.filter((event) => event.type.startsWith("session.next.compaction."))
+      expect(compactions.map((event) => event.type)).toEqual([
+        "session.next.compaction.started",
+        "session.next.compaction.failed",
+      ])
+      expect(compactions[1]).toMatchObject({ data: { failure: "interrupted" } })
+      const attempts = history.filter((event) => event.type.startsWith("session.next.provider-attempt."))
+      expect(attempts.slice(-2).map((event) => event.type)).toEqual([
+        "session.next.provider-attempt.started",
+        "session.next.provider-attempt.ended",
+      ])
+    }),
+  )
+
+  it.effect("blocks duplicate automatic and manual summaries after an unmatched compaction start", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const execution = yield* SessionExecution.Service
+      response = fragmentFixture("text", "text-earlier", ["Earlier answer"]).completeEvents
+      yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Earlier completed question ".repeat(180) }),
+        resume: false,
+      })
+      yield* session.resume(sessionID)
+
+      currentModel = compactModel
+      const compactionID = SessionMessage.ID.create()
+      yield* events.publish(SessionEvent.Compaction.Started, {
+        sessionID,
+        messageID: compactionID,
+        timestamp: DateTime.makeUnsafe(1),
+        reason: "auto",
+      })
+      yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Do not summarize twice ".repeat(180) }),
+        resume: false,
+      })
+      requests.length = 0
+
+      yield* session.resume(sessionID)
+      const manual = yield* execution.compact(sessionID).pipe(Effect.exit)
+
+      expect(requests).toHaveLength(0)
+      expect(Exit.isFailure(manual)).toBe(true)
+      if (Exit.isFailure(manual)) expect(Cause.hasInterruptsOnly(manual.cause)).toBe(true)
+      expect(
+        (yield* session.history({ sessionID, limit: 100 })).events.filter(
+          (event) => event.type === "session.next.compaction.started",
+        ),
+      ).toHaveLength(1)
     }),
   )
 
@@ -1923,6 +2519,11 @@ describe("SessionRunnerLLM", () => {
             },
           ],
         },
+        {
+          type: "assistant",
+          finish: "error",
+          error: { message: "Provider stream ended without an assistant response" },
+        },
       ])
 
       yield* replaySessionProjection(sessionID)
@@ -1952,6 +2553,11 @@ describe("SessionRunnerLLM", () => {
               },
             },
           ],
+        },
+        {
+          type: "assistant",
+          finish: "error",
+          error: { message: "Provider stream ended without an assistant response" },
         },
       ])
     }),
@@ -2439,6 +3045,11 @@ describe("SessionRunnerLLM", () => {
             },
           ],
         },
+        {
+          type: "assistant",
+          finish: "error",
+          error: { message: "Provider stream ended without an assistant response" },
+        },
       ])
     }),
   )
@@ -2538,6 +3149,11 @@ describe("SessionRunnerLLM", () => {
       expect(yield* session.context(sessionID)).toMatchObject([
         { type: "user", text: "Recover interrupted tool input" },
         { type: "assistant", content: [{ type: "tool", id: "call-pending-interrupted", state: { status: "error" } }] },
+        {
+          type: "assistant",
+          finish: "error",
+          error: { message: "Provider stream ended without an assistant response" },
+        },
       ])
     }),
   )
@@ -2887,6 +3503,28 @@ describe("SessionRunnerLLM", () => {
           ],
         },
       ])
+      const firstAttempts = (yield* session.history({ sessionID, limit: 100 })).events.filter((event) =>
+        event.type.startsWith("session.next.provider-attempt."),
+      )
+      expect(firstAttempts).toHaveLength(2)
+      const firstAttempt = firstAttempts.find((event) => event.type === "session.next.provider-attempt.started")
+      if (firstAttempt?.type !== "session.next.provider-attempt.started")
+        return yield* Effect.die("Provider attempt did not start")
+      expect(firstAttempts[1]).toMatchObject({
+        type: "session.next.provider-attempt.ended",
+        data: { attemptID: firstAttempt.data.attemptID, outcome: "interrupted" },
+      })
+
+      response = fragmentFixture("text", "text-after-decline", ["Session recovered"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue after decline" }), resume: false })
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(2)
+      expect((yield* session.context(sessionID)).at(-1)).toMatchObject({
+        type: "assistant",
+        finish: "stop",
+        content: [{ type: "text", text: "Session recovered" }],
+      })
     }),
   )
 
@@ -3509,10 +4147,95 @@ describe("SessionRunnerLLM", () => {
     )
   }
 
+  it.effect("closes a provider attempt when a successful stream ends after partial assistant output", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Return partial output" }), resume: false })
+      requests.length = 0
+      response = fragmentFixture("text", "text-partial-success", ["Partial"]).partialEvents
+
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(1)
+      expect((yield* session.context(sessionID)).at(-1)).toMatchObject({
+        type: "assistant",
+        finish: "error",
+        error: { message: "Provider stream ended before completing the assistant response" },
+      })
+      const attempts = (yield* session.history({ sessionID, limit: 100 })).events.filter((event) =>
+        event.type.startsWith("session.next.provider-attempt."),
+      )
+      expect(attempts).toHaveLength(2)
+      const started = attempts.find((event) => event.type === "session.next.provider-attempt.started")
+      if (started?.type !== "session.next.provider-attempt.started")
+        return yield* Effect.die("Provider attempt did not start")
+      expect(attempts[1]).toMatchObject({
+        type: "session.next.provider-attempt.ended",
+        data: { attemptID: started.data.attemptID, outcome: "failed" },
+      })
+    }),
+  )
+
+  it.effect("fails an empty successful provider turn and keeps the next prompt in a separate attempt", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      requests.length = 0
+      const first = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Return no assistant output" }),
+        resume: false,
+      })
+      requests.length = 0
+      response = []
+
+      yield* session.resume(sessionID)
+
+      expect((yield* session.context(sessionID)).at(-1)).toMatchObject({
+        type: "assistant",
+        finish: "error",
+        error: { message: "Provider stream ended without an assistant response" },
+      })
+
+      const second = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Start a distinct turn" }),
+        resume: false,
+      })
+      response = fragmentFixture("text", "text-after-empty", ["Recovered"]).completeEvents
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(2)
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "user", id: first.id },
+        { type: "assistant", finish: "error" },
+        { type: "user", id: second.id },
+        { type: "assistant", finish: "stop", content: [{ type: "text", text: "Recovered" }] },
+      ])
+      const attempts = (yield* session.history({ sessionID, limit: 100 })).events.filter(
+        (event) => event.type === "session.next.provider-attempt.started",
+      )
+      expect(attempts).toHaveLength(2)
+      expect(attempts[0]).toMatchObject({ data: { inputMessageIDs: [first.id] } })
+      expect(attempts[1]).toMatchObject({ data: { inputMessageIDs: [second.id] } })
+      const outcomes = (yield* session.history({ sessionID, limit: 100 })).events.filter(
+        (event) => event.type === "session.next.provider-attempt.ended",
+      )
+      expect(outcomes).toMatchObject([{ data: { outcome: "failed" } }, { data: { outcome: "completed" } }])
+    }),
+  )
+
   it.effect("rejects duplicate streamed text starts", () =>
     Effect.gen(function* () {
       yield* setup
       const session = yield* SessionV2.Service
+      requests.length = 0
+      const first = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Trigger a publisher defect" }),
+        resume: false,
+      })
       responses = undefined
       streamGate = undefined
       streamStarted = undefined
@@ -3521,6 +4244,36 @@ describe("SessionRunnerLLM", () => {
       expect(yield* session.resume(sessionID).pipe(Effect.catchDefect(Effect.succeed))).toBe(
         "Duplicate text start: text-1",
       )
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "user", id: first.id },
+        {
+          type: "assistant",
+          finish: "error",
+          error: { message: "Provider stream failed internally" },
+        },
+      ])
+      const firstAttempts = (yield* session.history({ sessionID, limit: 100 })).events.filter((event) =>
+        event.type.startsWith("session.next.provider-attempt."),
+      )
+      expect(firstAttempts).toHaveLength(2)
+      expect(firstAttempts[1]).toMatchObject({
+        type: "session.next.provider-attempt.ended",
+        data: { outcome: "failed" },
+      })
+
+      const second = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Reuse the Session after the defect" }),
+        resume: false,
+      })
+      response = fragmentFixture("text", "text-after-defect", ["Recovered"]).completeEvents
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(2)
+      expect((yield* session.context(sessionID)).slice(-2)).toMatchObject([
+        { type: "user", id: second.id },
+        { type: "assistant", finish: "stop", content: [{ type: "text", text: "Recovered" }] },
+      ])
     }),
   )
 

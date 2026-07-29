@@ -24,6 +24,7 @@ const input = MoveSession.Input.make({
   moveChanges: true,
 })
 const called = Ref.makeUnsafe<MoveSession.Input | undefined>(undefined)
+const terminalID = SessionV2.ID.make("ses_terminal_move")
 
 const apiLayer = HttpRouter.serve(
   HttpApiBuilder.layer(RootHttpApi).pipe(
@@ -41,7 +42,10 @@ const apiLayer = HttpRouter.serve(
   Layer.provide(Layer.mock(Installation.Service)({})),
   Layer.provide(
     Layer.mock(MoveSession.Service)({
-      moveSession: (value) => Ref.set(called, value),
+      moveSession: (value) =>
+        value.sessionID === terminalID
+          ? Effect.fail(new SessionV2.OperationUnavailableError({ operation: "move" }))
+          : Ref.set(called, value),
     }),
   ),
   Layer.provide(ServerAuth.Config.configLayer({ password: Option.none(), username: "opencode" })),
@@ -58,6 +62,22 @@ describe("control-plane HttpApi", () => {
 
       expect(response.status).toBe(204)
       expect(yield* Ref.get(called)).toEqual(input)
+    }),
+  )
+
+  it.live("returns a typed unavailable error for a protected terminal session", () =>
+    Effect.gen(function* () {
+      const response = yield* HttpClientRequest.post("/experimental/control-plane/move-session").pipe(
+        HttpClientRequest.setBody(HttpBody.jsonUnsafe({ ...input, sessionID: terminalID })),
+        HttpClient.execute,
+      )
+
+      expect(response.status).toBe(503)
+      expect(yield* response.json).toEqual({
+        _tag: "ServiceUnavailableError",
+        message: "Session move is not available",
+        service: "session.move",
+      })
     }),
   )
 })

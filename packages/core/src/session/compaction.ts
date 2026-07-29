@@ -8,6 +8,7 @@ import { SessionEvent } from "./event"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
 import { Token } from "../util/token"
+import { toLLMMessages } from "./runner/to-llm-message"
 
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_KEEP_TOKENS = 8_000
@@ -72,6 +73,11 @@ type Input = {
   readonly model: Model
   readonly request: LLMRequest
   readonly reason?: "auto" | "manual"
+  readonly onStarted?: Effect.Effect<void>
+  readonly continuation?: {
+    readonly attemptID: string
+    readonly inputMessageIDs: readonly SessionMessage.ID[]
+  }
 }
 
 export type Result = "not-needed" | "compacted" | "failed" | "cannot-fit"
@@ -135,70 +141,96 @@ const select = (
   entries: readonly Entry[],
   tokens: number,
   turns: number,
-): { readonly head: string; readonly recent: string } | undefined => {
+  fitsRecent: (messages: readonly SessionMessage.Message[]) => boolean = () => true,
+):
+  | {
+      readonly head: string
+      readonly recent: string
+      readonly retainedMessages: readonly SessionMessage.Message[]
+      readonly retainedMessageIDs: readonly SessionMessage.ID[]
+      readonly cannotFitNewest: boolean
+    }
+  | undefined => {
   const conversation = entries
     .filter((entry) => entry.message.type !== "compaction")
-    .map((entry) => ({ message: entry.message, text: serialize(entry.message) }))
-    .filter((entry) => entry.text.length > 0)
+    .map((entry) => ({ entry, message: entry.message, text: serialize(entry.message) }))
   if (conversation.length === 0) return
 
   const groups = conversation.reduce<
-    Array<{ readonly text: string[]; hasUser: boolean; settled: boolean; complete: boolean }>
-  >(
-    (result, entry) => {
-      const current = result.at(-1)
-      if (entry.message.type === "user") {
-        if (current && current.hasUser && !current.settled) {
-          current.text.push(entry.text)
-          return result
-        }
-        result.push({ text: [entry.text], hasUser: true, settled: false, complete: false })
-        return result
-      }
-      if (current?.complete && entry.message.type === "assistant") {
+    Array<{ readonly entries: Entry[]; readonly text: string[]; hasUser: boolean; settled: boolean; complete: boolean }>
+  >((result, entry) => {
+    const current = result.at(-1)
+    if (entry.message.type === "user") {
+      if (current && current.hasUser && !current.settled) {
+        current.entries.push(entry.entry)
         current.text.push(entry.text)
         return result
       }
-      if (!current || current.settled) {
-        result.push({ text: [entry.text], hasUser: false, settled: true, complete: false })
-        return result
-      }
-      current.text.push(entry.text)
-      if (
-        entry.message.type === "assistant" &&
-        (entry.message.time.completed !== undefined ||
-          entry.message.finish !== undefined ||
-          entry.message.error !== undefined)
-      ) {
-        current.settled = true
-        current.complete =
-          current.hasUser &&
-          entry.message.error === undefined &&
-          entry.message.finish !== "error" &&
-          entry.message.time.completed !== undefined
-      }
+      result.push({ entries: [entry.entry], text: [entry.text], hasUser: true, settled: false, complete: false })
       return result
-    },
-    [],
-  )
+    }
+    if (current?.complete && entry.message.type === "assistant") {
+      current.entries.push(entry.entry)
+      current.text.push(entry.text)
+      return result
+    }
+    if (!current || current.settled) {
+      result.push({
+        entries: [entry.entry],
+        text: [entry.text],
+        hasUser: false,
+        settled: true,
+        complete: false,
+      })
+      return result
+    }
+    current.entries.push(entry.entry)
+    current.text.push(entry.text)
+    if (
+      entry.message.type === "assistant" &&
+      entry.message.finish !== "tool-calls" &&
+      (entry.message.time.completed !== undefined ||
+        entry.message.finish !== undefined ||
+        entry.message.error !== undefined)
+    ) {
+      current.settled = true
+      current.complete =
+        current.hasUser &&
+        entry.message.error === undefined &&
+        entry.message.finish !== "error" &&
+        entry.message.time.completed !== undefined
+    }
+    return result
+  }, [])
   const retained = new Set<number>()
-  let total = 0
+  groups.forEach((group, index) => {
+    if (!group.settled) retained.add(index)
+  })
+  const retainedMessages = (extra?: number) =>
+    groups
+      .filter((_, index) => retained.has(index) || index === extra)
+      .flatMap((group) => group.entries)
+      .map((entry) => entry.message)
+  let completeTokens = 0
   let count = 0
+  let cannotFitNewest = !fitsRecent(retainedMessages())
   for (let index = groups.length - 1; index >= 0; index--) {
     const group = groups[index]
-    if (!group.settled) {
-      retained.add(index)
-      total += Token.estimate(group.text.join("\n\n"))
-      continue
-    }
+    if (!group.settled) continue
     if (!group.complete) continue
-    if (count >= turns) continue
-    const next = total + Token.estimate(group.text.join("\n\n"))
-    if (next > tokens && (count > 0 || total > 0)) continue
+    if (count >= turns) break
+    const groupTokens = Token.estimate(group.text.join("\n\n"))
+    const fitsRequest = fitsRecent(retainedMessages(index))
+    if (count === 0 && !fitsRequest) {
+      cannotFitNewest = true
+      break
+    }
+    if (!fitsRequest || (count > 0 && completeTokens + groupTokens > tokens)) break
     retained.add(index)
-    total = next
+    completeTokens += groupTokens
     count += 1
   }
+  const messages = retainedMessages()
   return {
     head: groups
       .filter((_, index) => !retained.has(index))
@@ -208,6 +240,9 @@ const select = (
       .filter((_, index) => retained.has(index))
       .flatMap((group) => group.text)
       .join("\n\n"),
+    retainedMessages: messages,
+    retainedMessageIDs: messages.map((message) => message.id),
+    cannotFitNewest,
   }
 }
 
@@ -222,20 +257,70 @@ export const buildPrompt = (input: { readonly previousSummary?: string; readonly
 
 export const make = (dependencies: Dependencies) => {
   const config = settings(dependencies.config)
+  const selection = (input: Input, summaryOutput: number) => {
+    const context = input.model.route.defaults.limits?.context
+    if (context === undefined || context <= 0) return select(input.entries, config.tokens, config.turns)
+    const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
+    const projected = toLLMMessages(
+      input.entries.map((entry) => entry.message),
+      input.model,
+    )
+    return select(input.entries, config.tokens, config.turns, (retainedMessages) => {
+      const checkpoint = SessionMessage.Compaction.make({
+        id: SessionMessage.ID.make("msg_compaction_budget"),
+        type: "compaction",
+        reason: input.reason ?? "auto",
+        summary: "x".repeat(summaryOutput * 4),
+        recent: "",
+        retainedMessageIDs: retainedMessages.map((message) => message.id),
+        time: { created: DateTime.makeUnsafe(0) },
+      })
+      return (
+        estimate({
+          system: input.request.system,
+          messages: [
+            ...toLLMMessages([checkpoint, ...retainedMessages], input.model),
+            ...input.request.messages.slice(projected.length),
+          ],
+          tools: input.request.tools,
+        }) <=
+        context - output
+      )
+    })
+  }
   const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (input: Input) {
     const context = input.model.route.defaults.limits?.context
     if (context === undefined || context <= 0) return "cannot-fit" as const
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
-    const selected = select(input.entries, config.tokens, config.turns)
+    const summaryOutput = Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS)
+    const selected = selection(input, summaryOutput)
     const previousSummary = input.entries.find((entry) => entry.message.type === "compaction")?.message
-    if (!selected || (selected.head.length === 0 && previousSummary?.type !== "compaction"))
+    if (!selected || selected.cannotFitNewest || (selected.head.length === 0 && previousSummary?.type !== "compaction"))
       return "cannot-fit" as const
     const summaryPrompt = buildPrompt({
       previousSummary: previousSummary?.type === "compaction" ? previousSummary.summary : undefined,
-      context: [previousSummary?.type === "compaction" ? previousSummary.recent : "", selected.head].filter(Boolean),
+      context: [
+        previousSummary?.type === "compaction" && previousSummary.retainedMessageIDs === undefined
+          ? previousSummary.recent
+          : "",
+        selected.head,
+      ].filter(Boolean),
     })
-    const summaryOutput = Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS)
-    if (Token.estimate(summaryPrompt) > context - summaryOutput) return "cannot-fit" as const
+    const summaryRequest = LLM.request({
+      model: input.model,
+      messages: [Message.user(summaryPrompt)],
+      tools: [],
+      generation: { maxTokens: summaryOutput },
+    })
+    if (
+      estimate({
+        system: summaryRequest.system,
+        messages: summaryRequest.messages,
+        tools: summaryRequest.tools,
+      }) >
+      context - summaryOutput
+    )
+      return "cannot-fit" as const
     const messageID = SessionMessage.ID.create()
     yield* dependencies.events.publish(SessionEvent.Compaction.Started, {
       sessionID: input.sessionID,
@@ -243,12 +328,11 @@ export const make = (dependencies: Dependencies) => {
       timestamp: yield* DateTime.now,
       reason: input.reason ?? "auto",
     })
+    if (input.onStarted) yield* input.onStarted
 
     const chunks: string[] = []
     let failed = false
-    const publishFailure = Effect.fnUntraced(function* (
-      failure: "provider-error" | "empty-summary" | "interrupted",
-    ) {
+    const publishFailure = Effect.fnUntraced(function* (failure: "provider-error" | "empty-summary" | "interrupted") {
       yield* dependencies.events.publish(SessionEvent.Compaction.Failed, {
         sessionID: input.sessionID,
         messageID,
@@ -257,25 +341,16 @@ export const make = (dependencies: Dependencies) => {
         failure,
       })
     })
-    const summarized = yield* dependencies.llm
-      .stream(
-        LLM.request({
-          model: input.model,
-          messages: [Message.user(summaryPrompt)],
-          tools: [],
-          generation: { maxTokens: summaryOutput },
-        }),
-      )
-      .pipe(
-        Stream.runForEach((event) => {
-          if (LLMEvent.is.providerError(event)) failed = true
-          if (LLMEvent.is.textDelta(event)) chunks.push(event.text)
-          return Effect.void
-        }),
-        Effect.as(true),
-        Effect.catchTag("LLM.Error", () => Effect.succeed(false)),
-        Effect.onInterrupt(() => publishFailure("interrupted")),
-      )
+    const summarized = yield* dependencies.llm.stream(summaryRequest).pipe(
+      Stream.runForEach((event) => {
+        if (LLMEvent.is.providerError(event)) failed = true
+        if (LLMEvent.is.textDelta(event)) chunks.push(event.text)
+        return Effect.void
+      }),
+      Effect.as(true),
+      Effect.catchTag("LLM.Error", () => Effect.succeed(false)),
+      Effect.onInterrupt(() => publishFailure("interrupted")),
+    )
     const summary = chunks.join("")
     if (!summarized || failed) {
       yield* publishFailure("provider-error")
@@ -292,6 +367,8 @@ export const make = (dependencies: Dependencies) => {
       reason: input.reason ?? "auto",
       text: summary,
       recent: selected.recent,
+      retainedMessageIDs: selected.retainedMessageIDs,
+      continuation: input.continuation,
     })
     return "compacted" as const
   })
@@ -308,16 +385,19 @@ export const make = (dependencies: Dependencies) => {
     const latestCompaction = input.entries.findLastIndex((entry) => entry.message.type === "compaction")
     if (
       latestCompaction >= 0 &&
-      !input.entries.slice(latestCompaction + 1).some(
-        (entry) =>
-          entry.message.type === "assistant" &&
-          entry.message.error === undefined &&
-          entry.message.finish !== "error" &&
-          entry.message.time.completed !== undefined,
-      )
+      !input.entries
+        .slice(latestCompaction + 1)
+        .some(
+          (entry) =>
+            entry.message.type === "assistant" &&
+            entry.message.error === undefined &&
+            entry.message.finish !== "error" &&
+            entry.message.time.completed !== undefined,
+        )
     )
       return "not-needed" as const
-    const selected = select(input.entries, config.tokens, config.turns)
+    const selected = selection(input, Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS))
+    if (selected?.cannotFitNewest) return "cannot-fit" as const
     if (selected?.head.length === 0) return "not-needed" as const
     return yield* compactAfterOverflow(input)
   })

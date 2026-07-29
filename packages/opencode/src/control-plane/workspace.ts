@@ -22,6 +22,7 @@ import { getAdapter, registeredAdapters } from "./adapters"
 import { type Target, type WorkspaceInfo, WorkspaceInfo as WorkspaceInfoSchema } from "./types"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import { Session } from "@/session/session"
+import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionID } from "@/session/schema"
@@ -125,6 +126,7 @@ type SessionWarpError =
   | SessionWarpHttpError
   | Vcs.PatchApplyError
   | HttpClientError.HttpClientError
+  | SessionV2.OperationUnavailableError
 type WaitForSyncError = SyncTimeoutError | SyncAbortedError
 type SyncLoopError = SyncHttpError | HttpClientError.HttpClientError
 
@@ -558,6 +560,7 @@ const layer = Layer.effect(
 
     const sessionWarp = Effect.fn("Workspace.sessionWarp")(function* (input: SessionWarpInput) {
       return yield* Effect.gen(function* () {
+        yield* session.assertWorkspaceMutable(input.sessionID)
         const current = yield* db
           .select({ workspaceID: SessionTable.workspace_id })
           .from(SessionTable)

@@ -234,6 +234,51 @@ describe("workspace HttpApi", () => {
     }),
   )
 
+  it.live("rejects terminal session warps before remote sync or file effects", () =>
+    Effect.gen(function* () {
+      Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = true
+      const dir = yield* tmpdirScoped({ git: true })
+      const project = yield* Project.use.fromDirectory(dir)
+      let calls = 0
+      const remote = listenRemoteHttp(() => {
+        calls += 1
+        return new Response("unexpected", { status: 500 })
+      })
+      yield* Effect.addFinalizer(() => Effect.sync(() => remote.stop(true)))
+      registerAdapter(project.project.id, "terminal-remote", remoteAdapter(dir, remote.url.href))
+      const createdWorkspace = yield* request(WorkspacePaths.list, dir, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "terminal-remote", branch: null }),
+      })
+      const workspace = (yield* createdWorkspace.json) as Workspace.Info
+      const created = yield* request("/api/session", dir, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          purpose: "terminal-chat",
+          agent: "chat",
+          model: { id: "opus", providerID: "amazon-bedrock" },
+          location: { directory: dir },
+        }),
+      })
+      const terminal = (yield* created.json) as { data: { id: string } }
+
+      const warped = yield* request(WorkspacePaths.warp, dir, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: workspace.id, sessionID: terminal.data.id, copyChanges: true }),
+      })
+
+      expect(warped.status).toBe(503)
+      expect(yield* warped.json).toMatchObject({
+        _tag: "ServiceUnavailableError",
+        service: "session.move",
+      })
+      expect(calls).toBe(0)
+    }),
+  )
+
   it.live("serves list sync endpoint", () =>
     Effect.gen(function* () {
       Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = true

@@ -13,8 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from .api import Client
-from .errors import BedrockError, NotFoundError
-from .io import write_json
+from .errors import (
+    BedrockError,
+    HTTPResponseError,
+    JSONWriteError,
+    NotFoundError,
+    TransportError,
+)
+from .io import locked, read_private_json_object, unlink_durable, write_json
 from .paths import ensure_private_directory, services_root
 from .service import Record
 
@@ -23,11 +29,13 @@ AGENT = "chat"
 PROVIDER = "amazon-bedrock"
 MODEL = "opus"
 HISTORY_MESSAGES = 50
+API_MESSAGE_PAGE = 1
+MESSAGE_BATCH_BYTES = 8 * 1024 * 1024
 HISTORY_LINES = 200
 HISTORY_BYTES = 64 * 1024
 PROMPT_BYTES = 1024 * 1024
+PROMPT_JOURNAL_BYTES = 8 * PROMPT_BYTES
 STREAM_BUFFER_BYTES = 1024 * 1024
-DURABLE_HISTORY_PAGES = 100
 BIDI_CONTROLS = {
     "\u061c",
     "\u200e",
@@ -49,30 +57,21 @@ class IneligibleChatError(BedrockError):
 
 
 def read_state(path: Path) -> dict[str, Any]:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(path, flags)
-    except FileNotFoundError:
-        return {}
-    except OSError as error:
-        raise BedrockError(f"cannot open private chat state: {error}") from error
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
-            raise BedrockError("private chat state must be a mode-0600 regular file")
-        with os.fdopen(descriptor, encoding="utf-8") as handle:
-            descriptor = -1
-            value = json.load(handle)
-    except (OSError, json.JSONDecodeError) as error:
-        raise BedrockError(f"cannot read private chat state: {error}") from error
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-    return value if isinstance(value, dict) else {}
+    value = read_private_json_object(path, label="private chat state")
+    assert value is not None
+    if set(value) - {"last_session", "pending_creation"} or not all(
+        _is_identifier(item) for item in value.values()
+    ):
+        raise BedrockError("private chat state is invalid")
+    return value
+
+
+def _is_identifier(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and all(character.isprintable() for character in value)
+    )
 
 
 def sanitize(value: object) -> str:
@@ -92,7 +91,12 @@ def sanitize(value: object) -> str:
 class SessionLock:
     def __init__(self, record: Record, session_id: str):
         digest = hashlib.sha256(session_id.encode()).hexdigest()
-        directory = ensure_private_directory(services_root() / record.key / "chat-locks")
+        try:
+            directory = ensure_private_directory(
+                services_root() / record.key / "chat-locks"
+            )
+        except OSError as error:
+            raise BedrockError(f"cannot prepare chat session lock: {error}") from error
         self.path = directory / f"{digest}.lock"
         flags = os.O_CREAT | os.O_RDWR
         if hasattr(os, "O_CLOEXEC"):
@@ -113,6 +117,9 @@ class SessionLock:
             raise BedrockError(
                 f"chat session is already open locally: {session_id}; close it or use /new"
             ) from error
+        except OSError as error:
+            os.close(self.descriptor)
+            raise BedrockError(f"cannot use chat session lock: {error}") from error
         except Exception:
             os.close(self.descriptor)
             raise
@@ -120,9 +127,12 @@ class SessionLock:
     def close(self) -> None:
         if self.descriptor < 0:
             return
-        fcntl.flock(self.descriptor, fcntl.LOCK_UN)
-        os.close(self.descriptor)
-        self.descriptor = -1
+        try:
+            fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+            os.close(self.descriptor)
+            self.descriptor = -1
+        except OSError as error:
+            raise BedrockError(f"cannot close chat session lock: {error}") from error
 
 
 class Chat:
@@ -133,19 +143,25 @@ class Chat:
         self.session: dict[str, Any] | None = None
         self.lock: SessionLock | None = None
         self.history_cursor: str | None = None
-        self.uncertain_admission: str | None = None
         self.state_path = services_root() / record.key / "chat.json"
+        self.state_lock_path = services_root() / record.key / "chat-state.lock"
+        self.creation_lock_path = services_root() / record.key / "chat-creation.lock"
 
     def open(self, new: bool = False, session_id: str | None = None) -> None:
         if new:
-            self.switch(self.create())
+            self._create_and_switch()
             self.ensure_existing_title()
             return
         if session_id:
             self.switch(self.api.get_chat_session(session_id))
             self.ensure_existing_title()
             return
-        selected = read_state(self.state_path).get("last_session")
+        state = read_state(self.state_path)
+        if state.get("pending_creation") is not None:
+            self._create_and_switch()
+            self.ensure_existing_title()
+            return
+        selected = state.get("last_session")
         if isinstance(selected, str):
             try:
                 self.switch(self.api.get_chat_session(selected))
@@ -153,32 +169,101 @@ class Chat:
                 return
             except (IneligibleChatError, NotFoundError):
                 pass
-        self.switch(self.create())
+        self._create_and_switch()
         self.ensure_existing_title()
 
     def create(self) -> dict[str, Any]:
-        session_id = f"ses_{uuid.uuid4().hex}"
-        session = self.api.create_chat_session(session_id)
+        with locked(self.creation_lock_path):
+            return self._create_locked()
+
+    def _create_and_switch(self) -> None:
+        with locked(self.creation_lock_path):
+            self.switch(self._create_locked())
+
+    def _create_locked(self) -> dict[str, Any]:
+        session_id = self._creation_id()
+        try:
+            session = self.api.create_chat_session(session_id)
+        except TransportError as first:
+            try:
+                session = self.api.create_chat_session(session_id)
+            except TransportError as second:
+                raise TransportError(
+                    f"chat creation outcome is unknown for session {session_id}: {second}"
+                ) from first
+            except BedrockError:
+                raise
+        except HTTPResponseError as error:
+            if self._definite_precommit(error):
+                self._clear_creation_id(session_id)
+            raise
+        except BedrockError:
+            self._clear_creation_id(session_id)
+            raise
         if session.get("id") != session_id:
             raise BedrockError("server did not confirm the requested chat session ID")
+        try:
+            self.validate(session)
+        except BedrockError:
+            self._clear_creation_id(session_id)
+            raise
         return session
 
     def switch(self, session: dict[str, Any]) -> None:
         self.validate(session)
-        if str(session["id"]) in self.api.active_chat_sessions():
+        target_id = str(session["id"])
+        self._ensure_current_inactive()
+        if target_id in self.api.active_chat_sessions():
             raise BedrockError(
                 f"chat session is currently generating: {session['id']}; "
                 "wait or interrupt it before switching"
             )
-        next_lock = SessionLock(self.record, str(session["id"]))
+        if self.session and str(self.session["id"]) == target_id:
+            self._recover_session(target_id)
+            self.session = session
+            self.history_cursor = None
+            return
+        next_lock = SessionLock(self.record, target_id)
         previous = self.lock
+        try:
+            self._recover_session(target_id)
+            if target_id in self.api.active_chat_sessions():
+                raise BedrockError(
+                    f"chat session is currently generating: {target_id}; "
+                    "wait or interrupt it before switching"
+                )
+            committed_error: JSONWriteError | None = None
+            try:
+                with locked(self.state_lock_path):
+                    state = read_state(self.state_path)
+                    state["last_session"] = session["id"]
+                    if state.get("pending_creation") == session["id"]:
+                        state.pop("pending_creation")
+                    write_json(self.state_path, state)
+            except JSONWriteError as error:
+                if not error.committed:
+                    raise
+                committed_error = error
+        except BaseException:
+            next_lock.close()
+            raise
         self.lock = next_lock
         self.session = session
         self.history_cursor = None
-        self.uncertain_admission = None
-        write_json(self.state_path, {"last_session": session["id"]})
         if previous:
             previous.close()
+        if committed_error:
+            raise committed_error
+
+    def _ensure_current_inactive(self) -> None:
+        if not self.session:
+            return
+        session_id = str(self.session["id"])
+        if session_id in self.api.active_chat_sessions():
+            raise BedrockError(
+                f"chat session is currently generating: {session_id}; "
+                "wait or interrupt it before switching"
+            )
 
     def validate(self, session: dict[str, Any]) -> None:
         model = session.get("model")
@@ -191,6 +276,8 @@ class Chat:
             or model.get("providerID") != PROVIDER
             or model.get("id") != MODEL
             or not isinstance(location, dict)
+            or "workspaceID" in location
+            or not isinstance(location.get("directory"), str)
             or Path(str(location.get("directory"))).resolve()
             != Path(self.record.workspace).resolve()
         ):
@@ -201,11 +288,231 @@ class Chat:
             self.lock.close()
             self.lock = None
 
+    def _write_state(self, **updates: object) -> None:
+        with locked(self.state_lock_path):
+            state = read_state(self.state_path)
+            for key, value in updates.items():
+                if value is None:
+                    state.pop(key, None)
+                    continue
+                state[key] = value
+            write_json(self.state_path, state)
+
+    def _creation_id(self) -> str:
+        with locked(self.state_lock_path):
+            state = read_state(self.state_path)
+            pending = state.get("pending_creation")
+            if pending is not None and (not isinstance(pending, str) or not pending):
+                raise BedrockError("private chat creation journal is invalid")
+            if isinstance(pending, str):
+                return pending
+            session_id = f"ses_{uuid.uuid4().hex}"
+            state["pending_creation"] = session_id
+            write_json(self.state_path, state)
+            return session_id
+
+    def _clear_creation_id(self, session_id: str) -> None:
+        with locked(self.state_lock_path):
+            state = read_state(self.state_path)
+            if state.get("pending_creation") != session_id:
+                return
+            state.pop("pending_creation")
+            write_json(self.state_path, state)
+
+    def _pending_prompt(self, session_id: str) -> dict[str, str] | None:
+        value = read_private_json_object(
+            self._prompt_path(session_id),
+            label="private prompt recovery journal",
+            limit=PROMPT_JOURNAL_BYTES,
+            missing=None,
+        )
+        if value is None:
+            return None
+        if (
+            set(value) != {"session_id", "message_id", "prompt", "delivery"}
+            or value.get("session_id") != session_id
+            or not _is_identifier(value.get("session_id"))
+            or not _is_identifier(value.get("message_id"))
+            or not isinstance(value.get("prompt"), str)
+            or len(value["prompt"].encode("utf-8")) > PROMPT_BYTES
+            or value.get("delivery") != "queue"
+        ):
+            raise BedrockError(
+                f"private prompt recovery journal is invalid for session {session_id}"
+            )
+        return {
+            "session_id": session_id,
+            "message_id": value["message_id"],
+            "prompt": value["prompt"],
+            "delivery": "queue",
+        }
+
+    def _save_pending_prompt(self, entry: dict[str, str]) -> None:
+        self._validate_prompt_entry(entry)
+        path = self._prompt_path(entry["session_id"])
+        with locked(path.with_suffix(".lock")):
+            write_json(path, entry)
+
+    def _clear_pending_prompt(self, entry: dict[str, str]) -> None:
+        path = self._prompt_path(entry["session_id"])
+        with locked(path.with_suffix(".lock")):
+            value = read_private_json_object(
+                path,
+                label="private prompt recovery journal",
+                limit=PROMPT_JOURNAL_BYTES,
+                missing=None,
+            )
+            if value is None:
+                return
+            self._validate_prompt_entry(value)
+            if value != entry:
+                return
+            unlink_durable(path, label="private prompt recovery journal")
+
+    def _prompt_path(self, session_id: str) -> Path:
+        if not _is_identifier(session_id):
+            raise BedrockError("invalid chat session identifier")
+        digest = hashlib.sha256(session_id.encode()).hexdigest()
+        try:
+            directory = ensure_private_directory(
+                services_root() / self.record.key / "chat-pending"
+            )
+        except OSError as error:
+            raise BedrockError(
+                f"cannot prepare prompt recovery directory: {error}"
+            ) from error
+        return directory / f"{digest}.json"
+
+    @staticmethod
+    def _validate_prompt_entry(entry: dict[str, str]) -> None:
+        if (
+            set(entry) != {"session_id", "message_id", "prompt", "delivery"}
+            or not _is_identifier(entry.get("session_id"))
+            or not _is_identifier(entry.get("message_id"))
+            or not isinstance(entry.get("prompt"), str)
+            or len(entry["prompt"].encode("utf-8")) > PROMPT_BYTES
+            or entry.get("delivery") != "queue"
+        ):
+            raise BedrockError("private prompt recovery journal entry is invalid")
+
+    def _admit_exact(
+        self,
+        entry: dict[str, str],
+        definite_is_final: bool,
+        *,
+        resume: bool,
+    ) -> bool:
+        retried = False
+        try:
+            response = self.api.prompt_chat(
+                entry["session_id"],
+                entry["message_id"],
+                entry["prompt"],
+                resume=resume,
+            )
+        except TransportError as first:
+            retried = True
+            try:
+                response = self.api.prompt_chat(
+                    entry["session_id"],
+                    entry["message_id"],
+                    entry["prompt"],
+                    resume=resume,
+                )
+            except TransportError as second:
+                raise TransportError(
+                    "prompt admission outcome is unknown for message "
+                    f"{entry['message_id']}: {second}"
+                ) from first
+            except BedrockError:
+                raise
+        except HTTPResponseError as error:
+            if definite_is_final and self._definite_precommit(error):
+                self._clear_pending_prompt(entry)
+            raise
+        except BedrockError:
+            if definite_is_final:
+                self._clear_pending_prompt(entry)
+            raise
+        if response.get("id") != entry["message_id"]:
+            raise BedrockError(
+                "server did not confirm the requested durable prompt message ID; "
+                f"recovery remains pending for {entry['message_id']}"
+            )
+        return retried
+
+    @staticmethod
+    def _definite_precommit(error: HTTPResponseError) -> bool:
+        return 400 <= error.status < 500
+
+    def recover_attachment(self) -> None:
+        assert self.session is not None
+        self._recover_session(str(self.session["id"]))
+
+    def _recover_session(self, session_id: str) -> None:
+        pending = self._pending_prompt(session_id)
+        recovery = self.api.chat_recovery(
+            session_id,
+            pending["message_id"] if pending else None,
+        )
+        if not pending:
+            return
+        status = recovery["requestedInputStatus"]
+        if status == "settled":
+            self._admit_exact(
+                pending,
+                definite_is_final=False,
+                resume=False,
+            )
+            self._clear_pending_prompt(pending)
+            return
+        if status == "attempted" or self._recovery_block(recovery):
+            return
+        if status not in {"absent", "unattempted"}:
+            raise TransportError("OpenCode API returned an invalid prompt recovery status")
+        resume = not recovery["otherUnresolvedInput"]
+        self._admit_exact(
+            pending,
+            definite_is_final=False,
+            resume=resume,
+        )
+        if not resume:
+            return
+        self.api.wait_chat(session_id)
+        settled = self.api.chat_recovery(
+            session_id,
+            pending["message_id"],
+        )["requestedInputStatus"]
+        if settled == "settled":
+            self._clear_pending_prompt(pending)
+
+    @staticmethod
+    def _recovery_block(
+        recovery: dict[str, Any],
+    ) -> str | None:
+        if recovery["unfinishedProviderAttempt"]:
+            return "a provider attempt has no durable outcome"
+        if recovery["unfinishedCompaction"]:
+            return "a compaction call has no durable outcome"
+        if (
+            recovery["attemptedUnsettledInput"]
+            or recovery["requestedInputStatus"] == "attempted"
+        ):
+            return "a provider attempt ended without terminal assistant settlement"
+        if recovery["otherUnresolvedInput"]:
+            return "another unresolved input has no safe automatic recovery path"
+        if (
+            recovery["unresolvedInput"]
+            and recovery["requestedInputStatus"] == "not-requested"
+        ):
+            return "an unresolved input has no local exact-retry journal"
+        return None
+
     def ensure_existing_title(self) -> None:
         assert self.session is not None
         if not str(self.session.get("title", "")).startswith("New session - "):
             return
-        messages = self.api.chat_messages(str(self.session["id"]), limit=50, order="asc")["data"]
+        messages, _ = self._message_batch(order="asc")
         first_user = next((message for message in messages if message.get("type") == "user"), None)
         if not first_user:
             return
@@ -268,35 +575,14 @@ class Chat:
         print(f"\nChat: {sanitize(self.session['title'])}")
         print(f"Session: {sanitize(self.session['id'])}")
         print("Model: Claude through Amazon Bedrock\n")
-        if self.has_unfinished_provider_attempt():
-            print(
-                "warning: a previous provider attempt has no durable outcome; "
-                "it will not be replayed automatically\n"
-            )
+        problem = self._recovery_block(self.api.chat_recovery(str(self.session["id"])))
+        if problem:
+            print(f"warning: {problem}; this chat will not be replayed automatically\n")
 
     def has_unfinished_provider_attempt(self) -> bool:
-        assert self.session is not None
-        after: int | None = None
-        active: set[str] = set()
-        for _ in range(DURABLE_HISTORY_PAGES):
-            response = self.api.chat_history(str(self.session["id"]), after=after)
-            events = response["data"]
-            for event in events:
-                data = event.get("data", {})
-                attempt_id = data.get("attemptID")
-                if not isinstance(attempt_id, str):
-                    continue
-                if event.get("type") == "session.next.provider-attempt.started":
-                    active.add(attempt_id)
-                if event.get("type") == "session.next.provider-attempt.ended":
-                    active.discard(attempt_id)
-            if not response.get("hasMore"):
-                return bool(active)
-            sequence = events[-1].get("durable", {}).get("seq") if events else None
-            if not isinstance(sequence, int) or sequence <= (after or -1):
-                raise BedrockError("durable chat history did not advance")
-            after = sequence
-        raise BedrockError("durable chat history exceeds the bounded recovery scan")
+        return self.api.chat_recovery(str(self.session["id"]))[
+            "unfinishedProviderAttempt"
+        ]
 
     def command(self, value: str) -> bool:
         command, _, argument = value.partition(" ")
@@ -306,7 +592,8 @@ class Chat:
             print("/new  /sessions  /use SESSION_ID  /history  /history more  /help  /quit")
             return False
         if command == "/new":
-            self.switch(self.create())
+            self._ensure_current_inactive()
+            self._create_and_switch()
             self.header()
             return False
         if command == "/sessions":
@@ -356,8 +643,8 @@ class Chat:
 
     def show_recent(self) -> None:
         assert self.session is not None
-        response = self.api.chat_messages(str(self.session["id"]), limit=HISTORY_MESSAGES)
-        visible = self._recent_complete(response["data"])
+        messages, _ = self._message_batch(complete_turns=10)
+        visible = self._recent_complete(messages)
         if not visible:
             return
         self._render(visible)
@@ -369,11 +656,8 @@ class Chat:
         if more and cursor is None:
             print("no older history")
             return
-        response = self.api.chat_messages(
-            str(self.session["id"]), limit=HISTORY_MESSAGES, cursor=cursor
-        )
-        self.history_cursor = response.get("cursor", {}).get("next")
-        visible = self._visible(response["data"])
+        messages, self.history_cursor = self._message_batch(cursor=cursor)
+        visible = self._visible(messages)
         self._render(visible)
         if self.history_cursor:
             print("(use /history more for older messages)")
@@ -382,96 +666,100 @@ class Chat:
         assert self.session is not None
         if len(prompt.encode("utf-8")) > PROMPT_BYTES:
             raise BedrockError("message exceeds the 1 MiB UTF-8 transport limit")
-        if self.uncertain_admission:
-            raise BedrockError(
-                "prompt admission is still outcome-unknown for message "
-                f"{self.uncertain_admission}; use /new rather than submitting another message"
-            )
         session_id = str(self.session["id"])
+        self.validate(self.api.get_chat_session(session_id))
+        self.recover_attachment()
         if session_id in self.api.active_chat_sessions():
-            raise BedrockError("chat session is still generating; wait or interrupt it before sending")
-        if self.has_unfinished_provider_attempt():
             raise BedrockError(
-                "chat has an outcome-unknown provider attempt and cannot accept another message; "
-                "use /new to avoid replaying uncertain work"
+                "chat session is still generating; wait or interrupt it before sending"
+            )
+        problem = self._recovery_block(self.api.chat_recovery(session_id))
+        if problem:
+            raise BedrockError(
+                f"chat is blocked because {problem}; use /new to avoid replaying uncertain work"
             )
         message_id = f"msg_{uuid.uuid4().hex}"
         self.validate(self.api.get_chat_session(session_id))
-        streams: list[Any] = []
+        pending = {
+            "session_id": session_id,
+            "message_id": message_id,
+            "prompt": prompt,
+            "delivery": "queue",
+        }
+        stream: Any | None = None
         stop_stream = threading.Event()
         event_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=64)
         reader: threading.Thread | None = None
         if not self.no_stream and sys.stdout.isatty():
             try:
-                streams.append(self.api.events())
+                stream = self.api.events()
 
                 def read_events() -> None:
                     target_attempt: str | None = None
                     target_assistant: str | None = None
                     target_text_ids: set[str] = set()
                     captured_bytes = 0
-                    for attempt in range(2):
-                        current = streams[-1]
-                        try:
-                            for event in current:
-                                if stop_stream.is_set():
-                                    return
-                                data = event.get("data", {})
-                                if data.get("sessionID") != session_id:
-                                    continue
-                                event_type = event.get("type")
-                                if (
-                                    event_type == "session.next.provider-attempt.started"
-                                    and message_id in data.get("inputMessageIDs", [])
-                                ):
-                                    target_attempt = str(data.get("attemptID"))
-                                    continue
-                                if (
-                                    event_type == "session.next.step.started"
-                                    and target_attempt
-                                    and target_assistant is None
-                                ):
-                                    target_assistant = str(data.get("assistantMessageID"))
-                                    continue
-                                if (
-                                    event_type == "session.next.text.started"
-                                    and data.get("assistantMessageID") == target_assistant
-                                ):
-                                    target_text_ids.add(str(data.get("textID")))
-                                    continue
-                                if (
-                                    event_type != "session.next.text.delta"
-                                    or data.get("assistantMessageID") != target_assistant
-                                    or data.get("textID") not in target_text_ids
-                                ):
-                                    continue
-                                delta = sanitize(data.get("delta", ""))
-                                captured_bytes += len(delta.encode("utf-8"))
-                                if captured_bytes > STREAM_BUFFER_BYTES:
-                                    stop_stream.set()
-                                    return
-                                try:
-                                    event_queue.put_nowait(("delta", delta))
-                                except queue.Full:
-                                    stop_stream.set()
-                                    return
-                            error = BedrockError("OpenCode event stream ended")
-                        except BedrockError as caught:
-                            error = caught
-                        if stop_stream.is_set():
-                            return
-                        if attempt == 0:
-                            current.close()
-                            try:
-                                streams.append(self.api.events())
+                    assert stream is not None
+                    try:
+                        for event in stream:
+                            if stop_stream.is_set():
+                                return
+                            if not isinstance(event, dict):
+                                raise TransportError(
+                                    "OpenCode event stream returned an invalid event"
+                                )
+                            data = event.get("data", {})
+                            if not isinstance(data, dict):
+                                raise TransportError(
+                                    "OpenCode event stream returned an invalid event"
+                                )
+                            if data.get("sessionID") != session_id:
                                 continue
-                            except BedrockError as caught:
-                                error = caught
-                        try:
-                            event_queue.put_nowait(("stream-error", error))
-                        except queue.Full:
-                            pass
+                            event_type = event.get("type")
+                            if (
+                                event_type == "session.next.provider-attempt.started"
+                                and message_id in data.get("inputMessageIDs", [])
+                            ):
+                                target_attempt = str(data.get("attemptID"))
+                                continue
+                            if (
+                                event_type == "session.next.step.started"
+                                and target_attempt
+                                and target_assistant is None
+                            ):
+                                target_assistant = str(data.get("assistantMessageID"))
+                                continue
+                            if (
+                                event_type == "session.next.text.started"
+                                and data.get("assistantMessageID") == target_assistant
+                            ):
+                                target_text_ids.add(str(data.get("textID")))
+                                continue
+                            if (
+                                event_type != "session.next.text.delta"
+                                or data.get("assistantMessageID") != target_assistant
+                                or data.get("textID") not in target_text_ids
+                            ):
+                                continue
+                            delta = sanitize(data.get("delta", ""))
+                            captured_bytes += len(delta.encode("utf-8"))
+                            if captured_bytes > STREAM_BUFFER_BYTES:
+                                stop_stream.set()
+                                return
+                            try:
+                                event_queue.put_nowait(("delta", delta))
+                            except queue.Full:
+                                stop_stream.set()
+                                return
+                        error = BedrockError("OpenCode event stream ended")
+                    except BedrockError as caught:
+                        error = caught
+                    if stop_stream.is_set():
                         return
+                    try:
+                        event_queue.put_nowait(("stream-error", error))
+                    except queue.Full:
+                        pass
 
                 reader = threading.Thread(target=read_events, daemon=True)
                 reader.start()
@@ -491,18 +779,13 @@ class Chat:
 
         streamed = ""
         try:
-            try:
-                self.api.prompt_chat(session_id, message_id, prompt)
-            except BedrockError as admission_error:
-                try:
-                    self.api.prompt_chat(session_id, message_id, prompt)
-                except BedrockError as recovery_error:
-                    self.uncertain_admission = message_id
-                    raise BedrockError(
-                        f"prompt admission outcome is unknown for message {message_id}: {recovery_error}"
-                    ) from admission_error
+            self._save_pending_prompt(pending)
+            if self._admit_exact(
+                pending,
+                definite_is_final=True,
+                resume=True,
+            ):
                 print("(prompt admission was confirmed by an exact durable retry)")
-            self.uncertain_admission = None
             print("claude> ", end="", flush=True)
             waiter = threading.Thread(target=wait, daemon=True)
             waiter.start()
@@ -527,7 +810,7 @@ class Chat:
             return
         finally:
             stop_stream.set()
-            for stream in streams:
+            if stream:
                 stream.close()
             if reader:
                 reader.join(timeout=1)
@@ -540,8 +823,13 @@ class Chat:
             if isinstance(error, Exception):
                 raise error
             raise BedrockError("session wait failed")
-        response = self.api.chat_messages(session_id, limit=HISTORY_MESSAGES)
-        answer = sanitize(self._answer_after(response["data"], message_id))
+        if (
+            self.api.chat_recovery(session_id, message_id)["requestedInputStatus"]
+            == "settled"
+        ):
+            self._clear_pending_prompt(pending)
+        messages, _ = self._message_batch()
+        answer = sanitize(self._answer_after(messages, message_id))
         if streamed and answer.startswith(streamed):
             print(answer[len(streamed) :])
         elif streamed and answer != streamed:
@@ -554,6 +842,54 @@ class Chat:
             if self.session and self.session.get("title") != previous_title:
                 print(f"(chat named: {sanitize(self.session['title'])})")
         self.session = self.api.get_chat_session(session_id)
+
+    def _message_batch(
+        self,
+        cursor: str | None = None,
+        order: str = "desc",
+        complete_turns: int | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        assert self.session is not None
+        messages: list[dict[str, Any]] = []
+        next_cursor = cursor
+        retained_bytes = 0
+        for _ in range(HISTORY_MESSAGES):
+            page_cursor = next_cursor
+            response = self.api.chat_messages(
+                str(self.session["id"]),
+                limit=API_MESSAGE_PAGE,
+                cursor=next_cursor,
+                order=order,
+            )
+            page = response["data"]
+            page_bytes = sum(
+                len(
+                    json.dumps(
+                        message,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+                for message in page
+            )
+            if retained_bytes + page_bytes > MESSAGE_BATCH_BYTES:
+                if not messages:
+                    raise TransportError(
+                        "OpenCode API returned a chat message exceeding the "
+                        "8 MiB retained history limit"
+                    )
+                return messages, page_cursor
+            messages.extend(page)
+            retained_bytes += page_bytes
+            next_cursor = response.get("cursor", {}).get("next")
+            if (
+                complete_turns is not None
+                and len(self._recent_complete(messages)) >= complete_turns * 2
+            ):
+                break
+            if not next_cursor:
+                break
+        return messages, next_cursor
 
     def _eligible(self, session: dict[str, Any]) -> bool:
         try:

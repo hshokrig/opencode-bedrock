@@ -21,6 +21,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionInput } from "@opencode-ai/core/session/input"
 import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionStore } from "@opencode-ai/core/session/store"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
@@ -46,6 +47,14 @@ const it = testEffect(
 )
 const location = Location.Ref.make({ directory: AbsolutePath.make("/project") })
 const id = SessionV2.ID.create()
+const terminalChat = {
+  purpose: SessionV2.Purpose.make("terminal-chat"),
+  agent: AgentV2.ID.make("chat"),
+  model: ModelV2.Ref.make({
+    id: ModelV2.ID.make("opus"),
+    providerID: ProviderV2.ID.amazonBedrock,
+  }),
+}
 
 describe("SessionV2.create", () => {
   it.effect("creates a fresh projected session when the ID is omitted", () =>
@@ -96,23 +105,20 @@ describe("SessionV2.create", () => {
   it.effect("persists and filters immutable Session purpose and adopts mutable-state retries", () =>
     Effect.gen(function* () {
       const session = yield* SessionV2.Service
-      const purpose = SessionV2.Purpose.make("terminal-chat")
       const created = yield* session.create({
         id,
-        purpose,
         location,
-        agent: AgentV2.ID.make("chat"),
+        ...terminalChat,
       })
       yield* session.create({ location })
 
-      expect(created).toMatchObject({ purpose, agent: "chat" })
-      expect(yield* session.list({ purpose })).toEqual([created])
+      expect(created).toMatchObject({ purpose: terminalChat.purpose, agent: "chat" })
+      expect(yield* session.list({ purpose: terminalChat.purpose })).toEqual([created])
       expect(
         yield* session.create({
           id,
-          purpose,
           location,
-          agent: AgentV2.ID.make("build"),
+          ...terminalChat,
         }),
       ).toEqual(created)
       expect(
@@ -367,6 +373,98 @@ describe("SessionV2.create", () => {
       expect(
         Array.from(yield* session.events({ sessionID: created.id }).pipe(Stream.take(1), Stream.runCollect)),
       ).toMatchObject([{ type: "session.next.agent.switched", data: { agent: "plan" } }])
+    }),
+  )
+
+  it.effect("keeps terminal-chat agent and model selection immutable", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const created = yield* session.create({ location, ...terminalChat })
+      const model = ModelV2.Ref.make({
+        id: ModelV2.ID.make("sonnet"),
+        providerID: ProviderV2.ID.anthropic,
+      })
+
+      const agentError = yield* session.switchAgent({ sessionID: created.id, agent: "plan" }).pipe(Effect.flip)
+      const modelError = yield* session.switchModel({ sessionID: created.id, model }).pipe(Effect.flip)
+
+      expect(agentError).toMatchObject({ _tag: "Session.OperationUnavailableError", operation: "switchAgent" })
+      expect(modelError).toMatchObject({ _tag: "Session.OperationUnavailableError", operation: "switchModel" })
+      expect(yield* session.get(created.id)).toMatchObject({ purpose: "terminal-chat" })
+    }),
+  )
+
+  it.effect("rejects every terminal-chat revert stage before recording effects", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const created = yield* session.create({ location, ...terminalChat })
+      const before = (yield* session.history({ sessionID: created.id, limit: 100 })).events.length
+
+      const staged = yield* session.revert
+        .stage({ sessionID: created.id, messageID: SessionMessage.ID.make("msg_missing"), files: true })
+        .pipe(Effect.flip)
+      const cleared = yield* session.revert.clear(created.id).pipe(Effect.flip)
+      const committed = yield* session.revert.commit(created.id).pipe(Effect.flip)
+
+      expect([staged, cleared, committed]).toMatchObject([
+        { _tag: "Session.OperationUnavailableError", operation: "revert" },
+        { _tag: "Session.OperationUnavailableError", operation: "revert" },
+        { _tag: "Session.OperationUnavailableError", operation: "revert" },
+      ])
+      expect((yield* session.history({ sessionID: created.id, limit: 100 })).events).toHaveLength(before)
+      expect((yield* session.get(created.id)).revert).toBeUndefined()
+    }),
+  )
+
+  it.effect("requires the exact local Bedrock chat tuple for terminal-chat creation", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const invalid = [
+        { location, purpose: terminalChat.purpose },
+        { location, ...terminalChat, agent: AgentV2.ID.make("build") },
+        {
+          location,
+          ...terminalChat,
+          model: ModelV2.Ref.make({ id: ModelV2.ID.make("sonnet"), providerID: ProviderV2.ID.amazonBedrock }),
+        },
+        {
+          location,
+          ...terminalChat,
+          model: ModelV2.Ref.make({ id: ModelV2.ID.make("opus"), providerID: ProviderV2.ID.anthropic }),
+        },
+        {
+          location: Location.Ref.make({
+            directory: location.directory,
+            workspaceID: WorkspaceV2.ID.make("wrk_terminal"),
+          }),
+          ...terminalChat,
+        },
+      ]
+
+      for (const input of invalid) {
+        expect(yield* session.create(input).pipe(Effect.flip)).toMatchObject({
+          _tag: "Session.InvalidCreateError",
+          reason: "terminal-chat-configuration",
+        })
+      }
+      expect(yield* session.list()).toEqual([])
+      const created = yield* session.create({ location, ...terminalChat })
+      expect(created).toMatchObject({
+        purpose: "terminal-chat",
+        agent: "chat",
+        model: { id: "opus", providerID: "amazon-bedrock" },
+        location: { directory: location.directory, workspaceID: undefined },
+      })
+      yield* (yield* Database.Service).db
+        .update(SessionTable)
+        .set({ agent: "build" })
+        .where(eq(SessionTable.id, created.id))
+        .run()
+        .pipe(Effect.orDie)
+      expect(yield* session.create({ id: created.id, location, ...terminalChat }).pipe(Effect.flip)).toMatchObject({
+        _tag: "Session.InvalidCreateError",
+        reason: "terminal-chat-configuration",
+      })
     }),
   )
 

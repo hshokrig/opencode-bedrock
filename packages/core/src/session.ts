@@ -37,6 +37,7 @@ import { SessionRevert } from "./session/revert"
 import { Revert } from "@opencode-ai/schema/revert"
 import { FSUtil } from "./fs-util"
 import { SessionDurable } from "@opencode-ai/schema/durable-event-manifest"
+import { SessionRecovery } from "./session/recovery"
 
 export const RevertState = Revert.State
 export type RevertState = Revert.State
@@ -97,7 +98,7 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("Ses
 export class OperationUnavailableError extends Schema.TaggedErrorClass<OperationUnavailableError>()(
   "Session.OperationUnavailableError",
   {
-    operation: Schema.Literals(["move", "shell", "skill", "switchAgent", "compact", "wait"]),
+    operation: Schema.Literals(["move", "shell", "skill", "switchAgent", "switchModel", "compact", "wait", "revert"]),
   },
 ) {}
 
@@ -111,6 +112,9 @@ export class PromptConflictError extends Schema.TaggedErrorClass<PromptConflictE
 export class CreateConflictError extends Schema.TaggedErrorClass<CreateConflictError>()("Session.CreateConflictError", {
   sessionID: SessionSchema.ID,
 }) {}
+export class InvalidCreateError extends Schema.TaggedErrorClass<InvalidCreateError>()("Session.InvalidCreateError", {
+  reason: Schema.Literal("terminal-chat-configuration"),
+}) {}
 export const MessageNotFoundError = SessionRevert.MessageNotFoundError
 export type MessageNotFoundError = SessionRevert.MessageNotFoundError
 
@@ -120,10 +124,11 @@ export type Error =
   | OperationUnavailableError
   | PromptConflictError
   | CreateConflictError
+  | InvalidCreateError
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
-  readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info, CreateConflictError>
+  readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info, CreateConflictError | InvalidCreateError>
   readonly get: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info, NotFoundError>
   readonly messages: (input: {
     sessionID: SessionSchema.ID
@@ -150,11 +155,18 @@ export interface Interface {
     after?: number
     limit: number
   }) => Effect.Effect<{ events: ReadonlyArray<SessionEvent.DurableEvent>; hasMore: boolean }, NotFoundError>
-  readonly switchAgent: (input: { sessionID: SessionSchema.ID; agent: string }) => Effect.Effect<void, NotFoundError>
+  readonly recovery: (input: {
+    sessionID: SessionSchema.ID
+    messageID?: SessionMessage.ID
+  }) => Effect.Effect<SessionRecovery.State, NotFoundError | MessageDecodeError>
+  readonly switchAgent: (input: {
+    sessionID: SessionSchema.ID
+    agent: string
+  }) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   readonly switchModel: (input: {
     sessionID: SessionSchema.ID
     model: ModelV2.Ref
-  }) => Effect.Effect<void, NotFoundError>
+  }) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   readonly compareAndSetTitle: (input: {
     sessionID: SessionSchema.ID
     expected: string
@@ -189,9 +201,11 @@ export interface Interface {
       sessionID: SessionSchema.ID
       messageID: SessionMessage.ID
       files?: boolean
-    }) => Effect.Effect<Revert.State, NotFoundError | MessageNotFoundError | Snapshot.Error>
-    readonly clear: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | Snapshot.Error>
-    readonly commit: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
+    }) => Effect.Effect<Revert.State, NotFoundError | MessageNotFoundError | Snapshot.Error | OperationUnavailableError>
+    readonly clear: (
+      sessionID: SessionSchema.ID,
+    ) => Effect.Effect<void, NotFoundError | Snapshot.Error | OperationUnavailableError>
+    readonly commit: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   }
 }
 
@@ -222,10 +236,30 @@ const layer = Layer.effect(
 
     const result = Service.of({
       create: Effect.fn("V2Session.create")(function* (input) {
+        if (
+          input.purpose === "terminal-chat" &&
+          (input.agent !== "chat" ||
+            input.model?.providerID !== "amazon-bedrock" ||
+            input.model.id !== "opus" ||
+            input.model.variant !== undefined ||
+            input.location.workspaceID !== undefined)
+        ) {
+          return yield* new InvalidCreateError({ reason: "terminal-chat-configuration" })
+        }
         const sessionID = input.id ?? SessionSchema.ID.create()
         const recorded = yield* store.get(sessionID)
         if (recorded) {
           if (recorded.purpose !== input.purpose) return yield* new CreateConflictError({ sessionID })
+          if (
+            recorded.purpose === "terminal-chat" &&
+            (recorded.agent !== "chat" ||
+              recorded.model?.providerID !== "amazon-bedrock" ||
+              recorded.model.id !== "opus" ||
+              ![undefined, "default"].includes(recorded.model.variant) ||
+              recorded.location.workspaceID !== undefined)
+          ) {
+            return yield* new InvalidCreateError({ reason: "terminal-chat-configuration" })
+          }
           return recorded
         }
         const project = yield* projects.resolve(input.location.directory)
@@ -378,6 +412,10 @@ const layer = Layer.effect(
           manifest: SessionDurable,
         })
       }),
+      recovery: Effect.fn("V2Session.recovery")(function* (input) {
+        yield* result.get(input.sessionID)
+        return yield* SessionRecovery.inspect(db, input)
+      }),
       prompt: Effect.fn("V2Session.prompt")((input) =>
         Effect.uninterruptible(
           Effect.gen(function* () {
@@ -412,7 +450,8 @@ const layer = Layer.effect(
         return yield* new OperationUnavailableError({ operation: "skill" })
       }),
       switchAgent: Effect.fn("V2Session.switchAgent")(function* (input) {
-        yield* result.get(input.sessionID)
+        if ((yield* result.get(input.sessionID)).purpose === "terminal-chat")
+          return yield* new OperationUnavailableError({ operation: "switchAgent" })
         yield* events.publish(SessionEvent.AgentSwitched, {
           sessionID: input.sessionID,
           messageID: SessionMessage.ID.create(),
@@ -422,6 +461,8 @@ const layer = Layer.effect(
       }),
       switchModel: Effect.fn("V2Session.switchModel")(function* (input) {
         const session = yield* result.get(input.sessionID)
+        if (session.purpose === "terminal-chat")
+          return yield* new OperationUnavailableError({ operation: "switchModel" })
         if (
           session.model?.providerID === input.model.providerID &&
           session.model.id === input.model.id &&
@@ -466,6 +507,7 @@ const layer = Layer.effect(
       revert: {
         stage: Effect.fn("V2Session.revert.stage")(function* (input) {
           const session = yield* result.get(input.sessionID)
+          if (session.purpose === "terminal-chat") return yield* new OperationUnavailableError({ operation: "revert" })
           return yield* SessionRevert.stage({ session, messageID: input.messageID, files: input.files }).pipe(
             Effect.provideService(Database.Service, database),
             Effect.provideService(EventV2.Service, events),
@@ -474,6 +516,7 @@ const layer = Layer.effect(
         }),
         clear: Effect.fn("V2Session.revert.clear")(function* (sessionID) {
           const session = yield* result.get(sessionID)
+          if (session.purpose === "terminal-chat") return yield* new OperationUnavailableError({ operation: "revert" })
           yield* SessionRevert.clear(session).pipe(
             Effect.provideService(EventV2.Service, events),
             Effect.provide(locations.get(session.location)),
@@ -481,6 +524,7 @@ const layer = Layer.effect(
         }),
         commit: Effect.fn("V2Session.revert.commit")(function* (sessionID) {
           const session = yield* result.get(sessionID)
+          if (session.purpose === "terminal-chat") return yield* new OperationUnavailableError({ operation: "revert" })
           yield* SessionRevert.commit(session).pipe(Effect.provideService(EventV2.Service, events))
         }),
       },

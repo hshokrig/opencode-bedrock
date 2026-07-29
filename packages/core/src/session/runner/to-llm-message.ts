@@ -157,7 +157,7 @@ ${message.summary}
 </summary>
 
 <recent-context>
-${message.recent}
+${message.retainedMessageIDs === undefined ? message.recent : ""}
 </recent-context>
 </conversation-checkpoint>`,
           metadata: message.metadata,

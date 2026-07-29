@@ -15,6 +15,7 @@ import { Effect, Scope } from "effect"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
 import { HistoryPayload, ReplayPayload, SessionPayload } from "../groups/sync"
+import { ServiceUnavailableError } from "../errors"
 
 export const syncHandlers = HttpApiBuilder.group(InstanceHttpApi, "sync", (handlers) =>
   Effect.gen(function* () {
@@ -48,7 +49,15 @@ export const syncHandlers = HttpApiBuilder.group(InstanceHttpApi, "sync", (handl
         directory: ctx.payload.directory,
       })
       const ownerID = yield* InstanceState.workspaceID
-      yield* events.replayAll(payload, { ownerID, strictOwner: true })
+      yield* events
+        .replayAll(payload, { ownerID, strictOwner: true })
+        .pipe(
+          Effect.catchDefect((defect) =>
+            defect instanceof EventV2.InvalidDurableEventError
+              ? Effect.fail(new HttpApiError.BadRequest({}))
+              : Effect.die(defect),
+          ),
+        )
       yield* Effect.logInfo("sync replay complete", {
         sessionID: source,
         events: payload.length,
@@ -62,7 +71,16 @@ export const syncHandlers = HttpApiBuilder.group(InstanceHttpApi, "sync", (handl
       const workspaceID = yield* InstanceState.workspaceID
       if (!workspaceID) return yield* new HttpApiError.BadRequest({})
 
-      yield* session.setWorkspace({ sessionID: ctx.payload.sessionID, workspaceID })
+      yield* session.setWorkspace({ sessionID: ctx.payload.sessionID, workspaceID }).pipe(
+        Effect.catchTag(
+          "Session.OperationUnavailableError",
+          (error) =>
+            new ServiceUnavailableError({
+              message: `Session ${error.operation} is not available`,
+              service: `session.${error.operation}`,
+            }),
+        ),
+      )
 
       yield* Effect.logInfo("sync session stolen", { sessionID: ctx.payload.sessionID, workspaceID })
 

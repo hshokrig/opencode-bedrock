@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, gte, ne, or } from "drizzle-orm"
+import { and, asc, desc, eq, gt, gte, inArray, ne, or } from "drizzle-orm"
 import { Effect, Schema } from "effect"
 import { Database } from "../database/database"
 import { MessageDecodeError } from "./error"
@@ -6,13 +6,13 @@ import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
 import { SessionContextEpochTable, SessionMessageTable } from "./sql"
 
-type DatabaseService = Database.Interface["db"]
+type DatabaseService = Pick<Database.Interface["db"], "select">
 
 const decode = Schema.decodeUnknownEffect(SessionMessage.Message)
 
-export const latestCompaction = Effect.fnUntraced(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
+const latestCompactionRow = Effect.fnUntraced(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
   return yield* db
-    .select({ seq: SessionMessageTable.seq })
+    .select()
     .from(SessionMessageTable)
     .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "compaction")))
     .orderBy(desc(SessionMessageTable.seq))
@@ -21,35 +21,9 @@ export const latestCompaction = Effect.fnUntraced(function* (db: DatabaseService
     .pipe(Effect.orDie)
 })
 
-const messageRows = Effect.fnUntraced(function* (
-  db: DatabaseService,
-  sessionID: SessionSchema.ID,
-  compaction: { readonly seq: number } | undefined,
-  baselineSeq?: number,
-) {
-  const rows = yield* db
-    .select()
-    .from(SessionMessageTable)
-    .where(
-      and(
-        eq(SessionMessageTable.session_id, sessionID),
-        compaction
-          ? or(
-              gte(SessionMessageTable.seq, compaction.seq),
-              baselineSeq === undefined
-                ? undefined
-                : and(eq(SessionMessageTable.type, "system"), gt(SessionMessageTable.seq, baselineSeq)),
-            )
-          : undefined,
-        baselineSeq === undefined
-          ? undefined
-          : or(ne(SessionMessageTable.type, "system"), gt(SessionMessageTable.seq, baselineSeq)),
-      ),
-    )
-    .orderBy(asc(SessionMessageTable.seq))
-    .all()
-    .pipe(Effect.orDie)
-  return rows
+export const latestCompaction = Effect.fnUntraced(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
+  const row = yield* latestCompactionRow(db, sessionID)
+  return row === undefined ? undefined : { seq: row.seq }
 })
 
 const decodeMessageRow = (row: typeof SessionMessageTable.$inferSelect) =>
@@ -63,6 +37,60 @@ const decodeMessageRow = (row: typeof SessionMessageTable.$inferSelect) =>
     ),
   )
 
+const messageRows = Effect.fnUntraced(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  compaction:
+    | {
+        readonly row: typeof SessionMessageTable.$inferSelect
+        readonly message: SessionMessage.Compaction
+      }
+    | undefined,
+  baselineSeq?: number,
+) {
+  const rows = yield* db
+    .select()
+    .from(SessionMessageTable)
+    .where(
+      and(
+        eq(SessionMessageTable.session_id, sessionID),
+        compaction
+          ? or(
+              gte(SessionMessageTable.seq, compaction.row.seq),
+              compaction.message.retainedMessageIDs?.length
+                ? inArray(SessionMessageTable.id, compaction.message.retainedMessageIDs)
+                : undefined,
+              baselineSeq === undefined
+                ? undefined
+                : and(eq(SessionMessageTable.type, "system"), gt(SessionMessageTable.seq, baselineSeq)),
+            )
+          : undefined,
+        baselineSeq === undefined
+          ? undefined
+          : or(ne(SessionMessageTable.type, "system"), gt(SessionMessageTable.seq, baselineSeq)),
+      ),
+    )
+    .orderBy(asc(SessionMessageTable.seq))
+    .all()
+    .pipe(Effect.orDie)
+  if (compaction?.message.retainedMessageIDs === undefined) return rows
+  const retained = new Set(compaction.message.retainedMessageIDs)
+  return [
+    ...rows.filter((row) => row.seq < compaction.row.seq && !retained.has(row.id)),
+    ...rows.filter((row) => row.seq === compaction.row.seq),
+    ...rows.filter((row) => row.seq < compaction.row.seq && retained.has(row.id)),
+    ...rows.filter((row) => row.seq > compaction.row.seq),
+  ]
+})
+
+const checkpoint = Effect.fnUntraced(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
+  const row = yield* latestCompactionRow(db, sessionID)
+  if (row === undefined) return
+  const message = yield* decodeMessageRow(row)
+  if (message.type !== "compaction") return yield* Effect.die("Compaction row decoded as another message type")
+  return { row, message }
+})
+
 export const load = Effect.fn("SessionHistory.load")(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
   const [epoch, compaction] = yield* Effect.all(
     [
@@ -72,7 +100,7 @@ export const load = Effect.fn("SessionHistory.load")(function* (db: DatabaseServ
         .where(eq(SessionContextEpochTable.session_id, sessionID))
         .get()
         .pipe(Effect.orDie),
-      latestCompaction(db, sessionID),
+      checkpoint(db, sessionID),
     ],
     { concurrency: "unbounded" },
   )
@@ -92,7 +120,7 @@ export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(fun
   sessionID: SessionSchema.ID,
   baselineSeq: number,
 ) {
-  const rows = yield* messageRows(db, sessionID, yield* latestCompaction(db, sessionID), baselineSeq)
+  const rows = yield* messageRows(db, sessionID, yield* checkpoint(db, sessionID), baselineSeq)
   return yield* Effect.forEach(rows, (row) =>
     decodeMessageRow(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
   )

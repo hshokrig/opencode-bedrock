@@ -337,10 +337,14 @@ import type {
   V2SessionActiveResponses,
   V2SessionCompactErrors,
   V2SessionCompactResponses,
+  V2SessionCompareAndSetTitleErrors,
+  V2SessionCompareAndSetTitleResponses,
   V2SessionContextErrors,
   V2SessionContextResponses,
   V2SessionCreateErrors,
   V2SessionCreateResponses,
+  V2SessionEnsureTitleErrors,
+  V2SessionEnsureTitleResponses,
   V2SessionEventsErrors,
   V2SessionEventsResponses,
   V2SessionGetErrors,
@@ -371,6 +375,8 @@ import type {
   V2SessionQuestionRejectResponses,
   V2SessionQuestionReplyErrors,
   V2SessionQuestionReplyResponses,
+  V2SessionRecoveryErrors,
+  V2SessionRecoveryResponses,
   V2SessionRevertClearErrors,
   V2SessionRevertClearResponses,
   V2SessionRevertCommitErrors,
@@ -5432,6 +5438,7 @@ export class Session3 extends HeyApiClient {
   public list<ThrowOnError extends boolean = false>(
     parameters?: {
       workspace?: string
+      purpose?: string
       limit?: number
       order?: "asc" | "desc"
       search?: string
@@ -5448,6 +5455,7 @@ export class Session3 extends HeyApiClient {
         {
           args: [
             { in: "query", key: "workspace" },
+            { in: "query", key: "purpose" },
             { in: "query", key: "limit" },
             { in: "query", key: "order" },
             { in: "query", key: "search" },
@@ -5474,6 +5482,7 @@ export class Session3 extends HeyApiClient {
   public create<ThrowOnError extends boolean = false>(
     parameters?: {
       id?: string
+      purpose?: string
       agent?: string
       model?: ModelRef
       location?: LocationRef
@@ -5486,6 +5495,7 @@ export class Session3 extends HeyApiClient {
         {
           args: [
             { in: "body", key: "id" },
+            { in: "body", key: "purpose" },
             { in: "body", key: "agent" },
             { in: "body", key: "model" },
             { in: "body", key: "location" },
@@ -5495,6 +5505,86 @@ export class Session3 extends HeyApiClient {
     )
     return (options?.client ?? this.client).post<V2SessionCreateResponses, V2SessionCreateErrors, ThrowOnError>({
       url: "/api/session",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Compare and set session title
+   *
+   * Replace a session title only when its current value exactly matches the expected title.
+   */
+  public compareAndSetTitle<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      expected?: string
+      title?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "body", key: "expected" },
+            { in: "body", key: "title" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      V2SessionCompareAndSetTitleResponses,
+      V2SessionCompareAndSetTitleErrors,
+      ThrowOnError
+    >({
+      url: "/api/session/{sessionID}/title",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Ensure a generated session title
+   *
+   * Generate one tool-free title from a completed exchange through the session model and compare-and-set the default title.
+   */
+  public ensureTitle<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      firstMessageID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "body", key: "firstMessageID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      V2SessionEnsureTitleResponses,
+      V2SessionEnsureTitleErrors,
+      ThrowOnError
+    >({
+      url: "/api/session/{sessionID}/title/ensure",
       ...options,
       ...params,
       headers: {
@@ -5531,6 +5621,36 @@ export class Session3 extends HeyApiClient {
     const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "sessionID" }] }])
     return (options?.client ?? this.client).get<V2SessionGetResponses, V2SessionGetErrors, ThrowOnError>({
       url: "/api/session/{sessionID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Inspect session recovery state
+   *
+   * Return bounded durable recovery flags without replaying provider or compaction work.
+   */
+  public recovery<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      messageID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "messageID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<V2SessionRecoveryResponses, V2SessionRecoveryErrors, ThrowOnError>({
+      url: "/api/session/{sessionID}/recovery",
       ...options,
       ...params,
     })

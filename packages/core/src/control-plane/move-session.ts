@@ -55,6 +55,7 @@ export class ResetSourceChangesError extends Schema.TaggedErrorClass<ResetSource
 
 export type Error =
   | SessionV2.NotFoundError
+  | SessionV2.OperationUnavailableError
   | DestinationProjectMismatchError
   | CaptureChangesError
   | ApplyChangesError
@@ -77,6 +78,8 @@ const layer = Layer.effect(
     const moveSession = Effect.fn("MoveSession.moveSession")(function* (input: Input) {
       const current = yield* sessions.get(input.sessionID)
       if (!current) return yield* new SessionV2.NotFoundError({ sessionID: input.sessionID })
+      if (current.purpose === "terminal-chat")
+        return yield* new SessionV2.OperationUnavailableError({ operation: "move" })
       const directory = AbsolutePath.make(input.destination.directory)
       if (current.location.directory === directory) return
 

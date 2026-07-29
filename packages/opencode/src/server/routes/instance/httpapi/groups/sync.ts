@@ -7,6 +7,7 @@ import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
 import { WorkspaceRoutingMiddleware, WorkspaceRoutingQuery } from "../middleware/workspace-routing"
 import { described } from "./metadata"
+import { ServiceUnavailableError } from "../errors"
 
 const root = "/sync"
 export const ReplayEvent = Schema.Struct({
@@ -72,7 +73,7 @@ export const SyncApi = HttpApi.make("sync")
           query: WorkspaceRoutingQuery,
           payload: SessionPayload,
           success: described(SessionPayload, "Session stolen into workspace"),
-          error: HttpApiError.BadRequest,
+          error: [HttpApiError.BadRequest, ServiceUnavailableError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "sync.steal",

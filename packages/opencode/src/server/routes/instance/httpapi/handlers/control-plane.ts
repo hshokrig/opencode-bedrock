@@ -4,6 +4,7 @@ import { Effect } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { RootHttpApi } from "../api"
 import { ApiMoveSessionError, MoveSessionPayload } from "../groups/control-plane"
+import { ServiceUnavailableError } from "../errors"
 
 export const controlPlaneHandlers = HttpApiBuilder.group(RootHttpApi, "controlPlane", (handlers) =>
   Effect.gen(function* () {
@@ -13,13 +14,17 @@ export const controlPlaneHandlers = HttpApiBuilder.group(RootHttpApi, "controlPl
       payload: typeof MoveSessionPayload.Type
     }) {
       yield* service.moveSession(ctx.payload).pipe(
-        Effect.mapError(
-          (error) =>
-            new ApiMoveSessionError({
-              name: "MoveSessionError",
-              data: { message: message(error) },
-            }),
-        ),
+        Effect.mapError((error) => {
+          if (error instanceof SessionV2.OperationUnavailableError)
+            return new ServiceUnavailableError({
+              message: `Session ${error.operation} is not available`,
+              service: `session.${error.operation}`,
+            })
+          return new ApiMoveSessionError({
+            name: "MoveSessionError",
+            data: { message: message(error) },
+          })
+        }),
       )
     })
 

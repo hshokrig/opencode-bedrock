@@ -51,6 +51,55 @@ async function initRepo(directory: string) {
 }
 
 describe("MoveSession", () => {
+  it.effect("rejects terminal-chat before resolving the destination or touching Git", () =>
+    Effect.gen(function* () {
+      const sessionID = SessionV2.ID.make("ses_move_terminal_chat")
+      const { db } = yield* Database.Service
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: abs("/project"), sandboxes: [], time_created: 1, time_updated: 1 })
+        .onConflictDoNothing()
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          purpose: SessionV2.Purpose.make("terminal-chat"),
+          project_id: Project.ID.global,
+          slug: "move-terminal-chat",
+          directory: abs("/project"),
+          title: "move terminal chat",
+          version: "test",
+          time_created: 1,
+          time_updated: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+
+      const error = yield* MoveSession.Service.use((service) =>
+        service
+          .moveSession({
+            sessionID,
+            destination: { directory: abs("/destination-that-must-not-resolve") },
+            moveChanges: true,
+          })
+          .pipe(Effect.flip),
+      )
+
+      expect(error).toMatchObject({ _tag: "Session.OperationUnavailableError", operation: "move" })
+      expect(
+        yield* db
+          .select({ directory: SessionTable.directory })
+          .from(SessionTable)
+          .where(eq(SessionTable.id, sessionID))
+          .get(),
+      ).toEqual({
+        directory: "/project",
+      })
+    }),
+  )
+
   it.live("moves session changes to another project directory", () =>
     Effect.gen(function* () {
       const root = yield* Effect.acquireRelease(

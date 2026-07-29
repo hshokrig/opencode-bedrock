@@ -9,12 +9,14 @@ import { SessionEvent } from "./event"
 import { SessionV1 } from "../v1/session"
 import { WorkspaceTable } from "../control-plane/workspace.sql"
 import { SessionMessage } from "./message"
+import { SessionID } from "@opencode-ai/schema/session-id"
 import { SessionMessageUpdater } from "./message-updater"
 import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { SessionContextEpoch } from "./context-epoch"
 import { MessageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "./sql"
 import type { DeepMutable } from "../schema"
+import { isDeepStrictEqual } from "node:util"
 
 type DatabaseService = Database.Interface["db"]
 
@@ -75,6 +77,94 @@ function sessionRow(info: SessionV1.SessionInfo): typeof SessionTable.$inferInse
     time_archived: info.time.archived,
   }
 }
+
+function validateTerminalConfiguration(info: SessionV1.SessionInfo, eventType: string) {
+  if (info.purpose !== "terminal-chat") return Effect.void
+  if (
+    info.agent === "chat" &&
+    info.model?.providerID === "amazon-bedrock" &&
+    info.model.id === "opus" &&
+    (info.model.variant === undefined || info.model.variant === "default") &&
+    info.workspaceID === undefined &&
+    info.parentID === undefined
+  )
+    return Effect.void
+  return Effect.die(
+    new EventV2.InvalidDurableEventError({
+      type: eventType,
+      message: `Invalid terminal-chat configuration for session ${info.id}`,
+    }),
+  )
+}
+
+const requireTerminalMutationAllowed = (db: DatabaseService, input: { sessionID: SessionID; eventType: string }) =>
+  Effect.gen(function* () {
+    const current = yield* db
+      .select({ purpose: SessionTable.purpose })
+      .from(SessionTable)
+      .where(eq(SessionTable.id, input.sessionID))
+      .get()
+      .pipe(Effect.orDie)
+    if (current?.purpose !== "terminal-chat") return
+    return yield* Effect.die(
+      new EventV2.InvalidDurableEventError({
+        type: input.eventType,
+        message: `Event ${input.eventType} cannot mutate terminal-chat session ${input.sessionID}`,
+      }),
+    )
+  })
+
+const validateTerminalUpdate = (db: DatabaseService, event: typeof SessionV1.Event.Updated.Type) =>
+  Effect.gen(function* () {
+    const current = yield* db
+      .select()
+      .from(SessionTable)
+      .where(eq(SessionTable.id, event.data.sessionID))
+      .get()
+      .pipe(Effect.orDie)
+    if (!current) return
+    if (current.purpose !== "terminal-chat") {
+      if (event.data.info.purpose !== "terminal-chat") return
+      return yield* Effect.die(
+        new EventV2.InvalidDurableEventError({
+          type: event.type,
+          message: `Event ${event.type} cannot convert session ${event.data.sessionID} into a terminal chat`,
+        }),
+      )
+    }
+
+    const next = sessionRow(event.data.info)
+    const sameModel =
+      current.model?.providerID === next.model?.providerID &&
+      current.model?.id === next.model?.id &&
+      (current.model?.variant ?? "default") === (next.model?.variant ?? "default")
+    const unchanged =
+      current.id === next.id &&
+      current.purpose === (next.purpose ?? null) &&
+      current.project_id === next.project_id &&
+      current.workspace_id === (next.workspace_id ?? null) &&
+      current.parent_id === (next.parent_id ?? null) &&
+      current.slug === next.slug &&
+      current.directory === next.directory &&
+      current.path === (next.path ?? null) &&
+      current.agent === (next.agent ?? null) &&
+      sameModel &&
+      current.version === next.version &&
+      current.share_url === (next.share_url ?? null) &&
+      current.summary_additions === (next.summary_additions ?? null) &&
+      current.summary_deletions === (next.summary_deletions ?? null) &&
+      current.summary_files === (next.summary_files ?? null) &&
+      isDeepStrictEqual(current.summary_diffs, next.summary_diffs ?? null) &&
+      isDeepStrictEqual(current.permission, next.permission ?? null) &&
+      isDeepStrictEqual(current.revert, next.revert ?? null)
+    if (unchanged) return
+    return yield* Effect.die(
+      new EventV2.InvalidDurableEventError({
+        type: event.type,
+        message: `Event ${event.type} cannot change immutable terminal-chat fields for session ${event.data.sessionID}`,
+      }),
+    )
+  })
 
 function messageData(
   info: (typeof SessionV1.Event.MessageUpdated.Type)["data"]["info"],
@@ -215,6 +305,7 @@ const layer = Layer.effectDiscard(
     const { db } = yield* Database.Service
     yield* events.project(SessionV1.Event.Created, (event) =>
       Effect.gen(function* () {
+        yield* validateTerminalConfiguration(event.data.info, event.type)
         const stored = yield* db
           .insert(SessionTable)
           .values(sessionRow(event.data.info))
@@ -234,15 +325,23 @@ const layer = Layer.effectDiscard(
       }),
     )
     yield* events.project(SessionV1.Event.Updated, (event) =>
-      db
-        .update(SessionTable)
-        .set(sessionRow(event.data.info))
-        .where(eq(SessionTable.id, event.data.sessionID))
-        .run()
-        .pipe(Effect.orDie),
+      Effect.gen(function* () {
+        yield* validateTerminalConfiguration(event.data.info, event.type)
+        yield* validateTerminalUpdate(db, event)
+        yield* db
+          .update(SessionTable)
+          .set(sessionRow(event.data.info))
+          .where(eq(SessionTable.id, event.data.sessionID))
+          .run()
+          .pipe(Effect.orDie)
+      }),
     )
     yield* events.project(SessionEvent.Moved, (event) =>
       Effect.gen(function* () {
+        yield* requireTerminalMutationAllowed(db, {
+          sessionID: event.data.sessionID,
+          eventType: event.type,
+        })
         yield* db
           .update(SessionTable)
           .set({
@@ -341,15 +440,26 @@ const layer = Layer.effectDiscard(
       }),
     )
     yield* events.project(SessionEvent.AgentSwitched, (event) =>
-      db
-        .update(SessionTable)
-        .set({ agent: event.data.agent, time_updated: DateTime.toEpochMillis(event.data.timestamp) })
-        .where(eq(SessionTable.id, event.data.sessionID))
-        .run()
-        .pipe(Effect.orDie, Effect.andThen(run(db, event))),
+      Effect.gen(function* () {
+        yield* requireTerminalMutationAllowed(db, {
+          sessionID: event.data.sessionID,
+          eventType: event.type,
+        })
+        yield* db
+          .update(SessionTable)
+          .set({ agent: event.data.agent, time_updated: DateTime.toEpochMillis(event.data.timestamp) })
+          .where(eq(SessionTable.id, event.data.sessionID))
+          .run()
+          .pipe(Effect.orDie)
+        yield* run(db, event)
+      }),
     )
     yield* events.project(SessionEvent.ModelSwitched, (event) =>
       Effect.gen(function* () {
+        yield* requireTerminalMutationAllowed(db, {
+          sessionID: event.data.sessionID,
+          eventType: event.type,
+        })
         yield* db
           .update(SessionTable)
           .set({ model: event.data.model, time_updated: DateTime.toEpochMillis(event.data.timestamp) })

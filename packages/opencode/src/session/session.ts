@@ -77,6 +77,7 @@ export function fromRow(row: SessionRow): Info {
     : undefined
   return {
     id: row.id,
+    purpose: row.purpose ?? undefined,
     slug: row.slug,
     projectID: row.project_id,
     workspaceID: row.workspace_id ?? undefined,
@@ -120,6 +121,7 @@ export function fromRow(row: SessionRow): Info {
 export function toRow(info: Info) {
   return {
     id: info.id,
+    purpose: info.purpose,
     project_id: info.projectID,
     workspace_id: info.workspaceID,
     parent_id: info.parentID,
@@ -223,6 +225,7 @@ export const Metadata = Schema.Record(Schema.String, Schema.Any)
 
 export const Info = Schema.Struct({
   id: SessionID,
+  purpose: Schema.optional(Schema.String),
   slug: Schema.String,
   projectID: ProjectV2.ID,
   workspaceID: optional(WorkspaceV2.ID),
@@ -445,7 +448,11 @@ export interface Interface {
   readonly clearRevert: (sessionID: SessionID) => Effect.Effect<void>
   readonly setSummary: (input: { sessionID: SessionID; summary: Info["summary"] }) => Effect.Effect<void>
   readonly setShare: (input: { sessionID: SessionID; share: Info["share"] }) => Effect.Effect<void>
-  readonly setWorkspace: (input: { sessionID: SessionID; workspaceID: Info["workspaceID"] }) => Effect.Effect<void>
+  readonly assertWorkspaceMutable: (sessionID: SessionID) => Effect.Effect<void, SessionV2.OperationUnavailableError>
+  readonly setWorkspace: (input: {
+    sessionID: SessionID
+    workspaceID: Info["workspaceID"]
+  }) => Effect.Effect<void, SessionV2.OperationUnavailableError>
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
   readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<SessionV1.WithParts[], NotFound>
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
@@ -813,10 +820,21 @@ const layer: Layer.Layer<
       yield* patch(input.sessionID, { share: input.share ?? null, time: { updated: Date.now() } }).pipe(Effect.orDie)
     })
 
+    const assertWorkspaceMutable = Effect.fn("Session.assertWorkspaceMutable")(function* (sessionID: SessionID) {
+      const row = yield* database.db
+        .select({ purpose: SessionTable.purpose })
+        .from(SessionTable)
+        .where(eq(SessionTable.id, sessionID))
+        .get()
+        .pipe(Effect.orDie)
+      if (row?.purpose === "terminal-chat") return yield* new SessionV2.OperationUnavailableError({ operation: "move" })
+    })
+
     const setWorkspace = Effect.fn("Session.setWorkspace")(function* (input: {
       sessionID: SessionID
       workspaceID: Info["workspaceID"]
     }) {
+      yield* assertWorkspaceMutable(input.sessionID)
       yield* patch(input.sessionID, { workspaceID: input.workspaceID, time: { updated: Date.now() } }).pipe(
         Effect.orDie,
       )
@@ -921,6 +939,7 @@ const layer: Layer.Layer<
       clearRevert,
       setSummary,
       setShare,
+      assertWorkspaceMutable,
       setWorkspace,
       diff,
       messages,
