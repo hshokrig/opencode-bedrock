@@ -1,47 +1,45 @@
-# Security
+# Security policy
 
-## IMPORTANT
+## Reporting a vulnerability
 
-We do not accept AI generated security reports. We receive a large number of
-these and we absolutely do not have the resources to review them all. If you
-submit one that will be an automatic ban from the project.
+Do not open a public issue for a suspected vulnerability. Use GitHub's private [Report a vulnerability](https://github.com/hshokrig/opencode-bedrock/security/advisories/new) form and include:
 
-## Threat Model
+- the affected commit or artifact version
+- the component and deployment environment
+- the security boundary that was crossed
+- a minimal reproducer with all AWS identifiers and credentials removed
+- the impact you observed
 
-### Overview
+Maintainers will respond as capacity allows. This is a community-maintained project and does not offer a guaranteed response time or commercial support agreement.
 
-OpenCode is an AI-powered coding assistant that runs locally on your machine. It provides an agent system with access to powerful tools including shell execution, file operations, and web access.
+If the issue also exists in unmodified OpenCode, report it to the [upstream OpenCode security process](https://github.com/anomalyco/opencode/security) and mention that this fork may also be affected.
 
-### No Sandbox
+## Supported version
 
-OpenCode does **not** sandbox the agent. The permission system exists as a UX feature to help users stay aware of what actions the agent is taking - it prompts for confirmation before executing commands, writing files, etc. However, it is not designed to provide security isolation.
+Security fixes are applied to the current `main` branch. Older commits and locally modified artifacts are not maintained releases.
 
-If you need true isolation, run OpenCode inside a Docker container or VM.
+## Fork threat model
 
-### Server Mode
+The Bedrock wrapper is intended to add a Linux workspace boundary around the native OpenCode service:
 
-Server mode is opt-in only. When enabled, set `OPENCODE_SERVER_PASSWORD` to require HTTP Basic Auth. Without this, the server runs unauthenticated (with a warning). It is the end user's responsibility to secure the server - any functionality it provides is not a vulnerability.
+- the service listens only on `127.0.0.1`
+- each service receives a generated password stored in a mode-0600 record
+- bubblewrap mounts the selected workspace read-write and required runtime files read-only
+- AWS and SSH configuration, unrelated home directories, and common credential files are not mounted
+- external-directory tools, credential-like files, web tools, model-catalog downloads, automatic updates, external plugins, and LSP downloads are denied by policy
+- file edits and non-read-only shell commands require approval by default
 
-### Out of Scope
+These controls have limits. The sandbox does not filter network traffic. The model receives repository content and can act through the tools allowed by the active policy. A hostile repository can contain misleading instructions. Bedrock data handling, configured Model Context Protocol servers, SageMaker administration, IAM policy, VPC routing, and the host operating system remain outside this repository's isolation boundary.
 
-| Category                        | Rationale                                                               |
-| ------------------------------- | ----------------------------------------------------------------------- |
-| **Server access when opted-in** | If you enable server mode, API access is expected behavior              |
-| **Sandbox escapes**             | The permission system is not a sandbox (see above)                      |
-| **LLM provider data handling**  | Data sent to your configured LLM provider is governed by their policies |
-| **MCP server behavior**         | External MCP servers you configure are outside our trust boundary       |
-| **Malicious config files**      | Users control their own config; modifying it is not an attack vector    |
+Read [docs/security-model.md](docs/security-model.md) before deployment or policy changes.
 
----
+## In scope
 
-# Reporting Security Issues
+- escaping the configured bubblewrap workspace boundary
+- bypassing loopback binding or service authentication
+- bypassing the configured tool or approval policy
+- leaking credentials or files that the documented sandbox says are unavailable
+- replaying a provider request after the durable attempt record says it must not be replayed
+- installer or artifact verification failures
 
-We appreciate your efforts to responsibly disclose your findings, and will make every effort to acknowledge your contributions.
-
-To report a security issue, please use the GitHub Security Advisory ["Report a Vulnerability"](https://github.com/anomalyco/opencode/security/advisories/new) tab.
-
-The team will send a response indicating the next steps in handling your report. After the initial reply to your report, the security team will keep you informed of the progress towards a fix and full announcement, and may ask for additional information or guidance.
-
-## Escalation
-
-If you do not receive an acknowledgement of your report within 6 business days, you may send an email to security@anoma.ly
+Configuration choices that deliberately disable a documented boundary are not vulnerabilities in the default configuration. Reports still need a reproducible path from the supported defaults.

@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 💬 Discord Community
-    url: https://discord.gg/opencode
-    about: For support, troubleshooting, how-to questions, and real-time discussion.
+  - name: Security report
+    url: https://github.com/hshokrig/opencode-bedrock/security/advisories/new
+    about: Report a suspected vulnerability privately.
+  - name: Upstream OpenCode issue
+    url: https://github.com/anomalyco/opencode/issues
+    about: Report a problem that also occurs in unmodified OpenCode.

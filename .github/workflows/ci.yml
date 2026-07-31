@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bedrock-harness:
+    name: Bedrock harness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Run Python tests
+        run: python3 -m unittest discover -s tests/bedrock -t .
+
+      - name: Check Python imports
+        run: python3 -m compileall -q opencode_bedrock scripts/aws/bedrock_smoke.py
+
+      - name: Check shell scripts
+        run: bash -n scripts/*.sh
+
+      - name: Check public JSON files
+        run: |
+          python3 -m json.tool opencode_bedrock/models-dev-api.json >/dev/null
+          python3 -m json.tool policies/sagemaker-bedrock-iam.json >/dev/null
+
+  native-session:
+    name: Native session
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Bun and dependencies
+        uses: ./.github/actions/setup-bun
+        with:
+          install-flags: --frozen-lockfile
+
+      - name: Typecheck specialization packages
+        run: |
+          (cd packages/schema && bun typecheck)
+          (cd packages/core && bun typecheck)
+          (cd packages/server && bun typecheck)
+          (cd packages/opencode && bun typecheck)
+
+      - name: Test Schema and Server boundaries
+        run: |
+          (cd packages/schema && bun test test/event.test.ts)
+          (cd packages/server && bun test test/session-title-coordinator.test.ts)
+
+      - name: Test durable Core sessions
+        run: |
+          cd packages/core
+          bun test --max-concurrency 1 \
+            test/database-migration.test.ts \
+            test/session-create.test.ts \
+            test/session-prompt.test.ts \
+            test/session-run-coordinator.test.ts
+
+      - name: Test native HTTP session transport
+        run: |
+          cd packages/opencode
+          bun test --timeout 10000 --max-concurrency 1 \
+            test/server/httpapi-session.test.ts \
+            test/server/httpapi-workspace.test.ts

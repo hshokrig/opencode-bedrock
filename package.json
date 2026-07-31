@@ -118,7 +118,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/anomalyco/opencode"
+    "url": "git+https://github.com/hshokrig/opencode-bedrock.git"
+  },
+  "homepage": "https://github.com/hshokrig/opencode-bedrock#readme",
+  "bugs": {
+    "url": "https://github.com/hshokrig/opencode-bedrock/issues"
   },
   "license": "MIT",
   "prettier": {

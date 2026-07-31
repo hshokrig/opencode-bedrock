@@ -6,9 +6,28 @@ build-backend = "setuptools.build_meta"
 name = "opencode-bedrock"
 version = "0.1.0"
 description = "Bedrock-first persistent service wrapper for OpenCode"
+readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
+keywords = ["amazon-bedrock", "sagemaker", "opencode", "claude", "coding-agent"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development",
+]
+
+[project.urls]
+Homepage = "https://github.com/hshokrig/opencode-bedrock"
+Repository = "https://github.com/hshokrig/opencode-bedrock.git"
+Issues = "https://github.com/hshokrig/opencode-bedrock/issues"
+Security = "https://github.com/hshokrig/opencode-bedrock/security/policy"
 
 [project.scripts]
 opencode-bedrock = "opencode_bedrock.cli:main"

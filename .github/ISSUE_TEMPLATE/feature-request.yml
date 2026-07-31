@@ -1,19 +1,35 @@
-name: 🚀 Feature Request
-description: Suggest an idea, feature, or enhancement
-title: "[FEATURE]:"
-
+name: Feature request
+description: Suggest a change to the Bedrock or SageMaker specialization
+title: "feat: "
+labels: [enhancement]
 body:
-  - type: checkboxes
-    id: verified
-    attributes:
-      label: Feature hasn't been suggested before.
-      options:
-        - label: I have verified this feature I'm about to request hasn't been suggested before.
-          required: true
-
   - type: textarea
+    id: problem
     attributes:
-      label: Describe the enhancement you want to request
-      description: What do you want to change or add? What are the benefits of implementing this? Try to be detailed so we can understand your request better :)
+      label: Problem
+      description: What fork-specific problem are you trying to solve?
     validations:
       required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the behavior, command, or documentation change you want.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This request is specific to Bedrock, SageMaker, offline packaging, or this fork's session and sandbox behavior.
+          required: true

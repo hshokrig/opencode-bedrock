@@ -1,24 +1,79 @@
 # OpenCode for Amazon Bedrock
 
-This repository packages OpenCode as a private, Bedrock-first coding service for Amazon SageMaker. A service is tied to one repository. It keeps running after the terminal disconnects, accepts tasks over a loopback-only API, and uses an Amazon Bedrock inference profile for Claude Opus.
+[![CI](https://github.com/hshokrig/opencode-bedrock/actions/workflows/ci.yml/badge.svg)](https://github.com/hshokrig/opencode-bedrock/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-The imported OpenCode revision is recorded in [UPSTREAM_REVISION](UPSTREAM_REVISION). OpenCode's MIT license and history are preserved.
+OpenCode for Amazon Bedrock is a self-hosted OpenCode fork for running coding agents with Claude Opus through Amazon Bedrock. It is designed for Linux workspaces, including Amazon SageMaker environments that cannot reach the public internet.
 
-## What you need
+The wrapper keeps one service per repository, survives terminal disconnects, accepts background tasks over a loopback-only API, and provides a focused terminal chat with durable history. A commit-specific offline archive contains the native OpenCode binary and all Python runtime files, so the target machine does not download packages during installation.
+
+> [!IMPORTANT]
+> This is an independent community fork. It is not an official OpenCode, Amazon Web Services, or Anthropic distribution. You provide and pay for the AWS account, SageMaker environment, Bedrock access, and Claude inference profile.
+
+## Project status
+
+The local harness, native session transport, offline installer, and Linux x64 release path are covered by automated tests. Live AWS checks are deliberately opt-in because they use your credentials and can incur Bedrock charges.
+
+The repository does not currently publish supported prebuilt binaries on GitHub Releases. Build the offline archive from the commit you reviewed, or use source directly on a connected development machine.
+
+## What it provides
+
+- A persistent background service for each Git repository
+- Basic agent tasks and a separate tool-free terminal chat
+- Bedrock inference-profile routing for Claude Opus
+- A bubblewrap workspace boundary on Linux
+- Loopback-only HTTP with a generated service password
+- An offline, checksum-verified installation archive
+- Explicit approval for file edits and non-read-only shell commands
+- Local tests that never call AWS unless `RUN_AWS_SMOKE=1` is set
+
+## Requirements
 
 - Linux x64 or ARM64
 - Python 3.10 or newer
-- `bubblewrap` (`bwrap`) for filesystem isolation
-- An OpenCode binary from this source tree or the offline artifact
-- An AWS Region and a Bedrock inference-profile ID or ARN
+- Git
+- `bubblewrap` (`bwrap`) with working user namespaces
+- Bun 1.3.14 when building from source
+- An AWS Region and an active Bedrock inference-profile ID or ARN whose destination models are Claude Opus
 - AWS credentials from the SageMaker execution role or another AWS default-chain source
 
-The local test suite does not call AWS. Real Bedrock checks require `RUN_AWS_SMOKE=1`.
+macOS and Windows are not native runtime targets. Use a Linux virtual machine or WSL with functional user namespaces.
+
+## Build from source
+
+Clone the fork on a connected Linux machine:
+
+```bash
+git clone https://github.com/hshokrig/opencode-bedrock.git
+cd opencode-bedrock
+git switch main
+
+ALLOW_NETWORK_BOOTSTRAP=1 ./scripts/bootstrap.sh
+export PATH="$HOME/.bun/bin:$PATH"
+./scripts/build-offline.sh /tmp/opencode-bedrock-release
+```
+
+The build refuses a dirty worktree and records the source commit in the artifact manifest. Build on the same CPU architecture as the target.
+
+Copy the archive, its `.sha256` file, `install-opencode-bedrock.sh`, and the installer's checksum to the target. Install them from the same directory:
+
+```bash
+sha256sum -c install-opencode-bedrock.sh.sha256
+sha256sum -c opencode-bedrock-*.tar.gz.sha256
+./install-opencode-bedrock.sh opencode-bedrock-*.tar.gz
+
+export PATH="$HOME/.local/bin:$PATH"
+opencode-bedrock doctor
+```
+
+For an internet-isolated SageMaker target, follow the [deployment runbook](docs/deployment-runbook.md). Do not clone and build the source inside SageMaker unless the environment has an approved dependency mirror.
 
 ## Start a project
 
+Set the AWS source Region and the Bedrock inference profile you intend to use:
+
 ```bash
-export AWS_REGION=eu-north-1
+export AWS_REGION='your-source-region'
 export BEDROCK_INFERENCE_PROFILE='your-profile-id-or-arn'
 
 opencode-bedrock project add \
@@ -29,18 +84,11 @@ opencode-bedrock start --project my-project
 opencode-bedrock status
 ```
 
-All agents use the primary profile by default. Override one agent when needed:
-
-```bash
-opencode-bedrock start --project my-project \
-  --agent-model review='another-profile-id-or-arn'
-```
-
 Submit a task and follow it:
 
 ```bash
 opencode-bedrock task --project my-project \
-  "Inspect the failing tests, explain the cause, and prepare the smallest safe fix."
+  "Inspect the failing tests and prepare the smallest safe fix."
 
 opencode-bedrock tasks --project my-project
 opencode-bedrock logs --project my-project --follow
@@ -55,73 +103,44 @@ opencode-bedrock approval reject --project my-project REQUEST_ID \
   --message "Use the existing parser instead."
 ```
 
-Attach OpenCode's terminal client or stop the service:
+Open the native terminal client or use the focused chat:
 
 ```bash
 opencode-bedrock attach --project my-project
-opencode-bedrock stop --project my-project
-```
-
-For a focused, tool-free Claude conversation with durable history:
-
-```bash
 opencode-bedrock chat --project my-project
 ```
 
-The terminal chat resumes its last selected Session, streams best-effort text, retains the full
-transcript, and compacts active context near the 200,000-token policy ceiling. See
-[Terminal chat](docs/terminal-chat.md) for commands, history behavior, call counts, offline
-dependencies, and power-loss handling.
-
 Use `--workspace /absolute/path` instead of `--project` for an unregistered repository. Non-Git directories require `--allow-non-git` on `start`.
 
-## Safety boundaries
+## Security boundaries
 
-Each service runs inside a bubblewrap mount namespace. The selected workspace is mounted read-write. The OpenCode binary, operating-system commands, shared libraries, and certificate files are mounted read-only. Other home-directory content is absent, including `~/.aws`, `~/.ssh`, unrelated repositories, and credential files.
+The selected workspace is mounted read-write inside a bubblewrap namespace. The OpenCode executable, operating-system commands, shared libraries, and certificate files are mounted read-only. Other home-directory content is absent, including AWS and SSH configuration, unrelated repositories, and common credential files.
 
-OpenCode also denies external-directory tools, reads of `.env` files, key files, and credential-like names, as well as web tools, auto-update, model-catalog downloads, external plugins, and LSP downloads. The server listens on `127.0.0.1` and uses a generated password stored in a mode-0600 service record.
+The sandbox does not filter network traffic. Bedrock needs network access, so tool permissions remain part of the security boundary. Keep the service bound to `127.0.0.1`, do not expose its generated password, and read the [security model](docs/security-model.md) before changing the headless policy.
 
-The sandbox does not filter network traffic. Bedrock needs network access, so shell and web permissions are the control against model-directed network calls. Read [docs/security-model.md](docs/security-model.md) before enabling `--headless-policy workspace-write`.
-
-## Build and install offline
-
-Build on a networked Linux machine with the pinned Bun version:
-
-```bash
-ALLOW_NETWORK_BOOTSTRAP=1 ./scripts/bootstrap.sh
-export PATH="$HOME/.bun/bin:$PATH"
-./scripts/build-offline.sh /tmp/opencode-bedrock-artifacts
-```
-
-The release archive name includes the specialization commit, for example
-`opencode-bedrock-0.1.0+f032a67bc4ac-linux-x64.tar.gz`. Copy that archive, its checksum,
-`install-opencode-bedrock.sh`, and the installer's checksum to SageMaker. Then run:
-
-```bash
-sha256sum -c install-opencode-bedrock.sh.sha256
-./install-opencode-bedrock.sh \
-  opencode-bedrock-0.1.0+SOURCE_COMMIT-linux-x64.tar.gz
-
-export PATH="$HOME/.local/bin:$PATH"
-opencode-bedrock doctor
-```
-
-The artifact includes the OpenCode executable, this wrapper, the opt-in AWS verifier, the IAM template, documentation, license notices, a version manifest, and checksums. It does not download packages at runtime.
+Never put AWS account IDs, role ARNs, inference-profile ARNs, bucket names, credentials, or service records in issues, logs, commits, or example configuration.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [Background service](docs/background-service.md)
-- [Project and workspace handling](docs/project-workspaces.md)
-- [Security model](docs/security-model.md)
-- [Offline installation](docs/offline-installation.md)
-- [SageMaker setup](docs/sagemaker-setup.md)
-- [Laptop and SageMaker release runbook](docs/deployment-runbook.md)
-- [AWS validation checklist](docs/aws-validation.md)
-- [Upstream sync procedure](docs/upstream-sync.md)
+- [Deployment runbook](docs/deployment-runbook.md): connected build machine, laptop, and SageMaker transfer
+- [Offline installation](docs/offline-installation.md): artifact contents, verification, upgrades, and rollback
+- [SageMaker setup](docs/sagemaker-setup.md): target-image and storage prerequisites
+- [AWS validation checklist](docs/aws-validation.md): paid live checks and acceptance tests
+- [Architecture](docs/architecture.md): components and trust boundaries
+- [Security model](docs/security-model.md): isolation guarantees and limits
+- [Background service](docs/background-service.md): lifecycle, approvals, and recovery
+- [Terminal chat](docs/terminal-chat.md): commands, persistence, and streaming
+- [Project workspaces](docs/project-workspaces.md): registration and repository selection
+- [Upstream sync](docs/upstream-sync.md): importing a new OpenCode revision
 
-AWS has the final word on inference-profile permissions and Region routing. The IAM template follows the current Amazon Bedrock guidance for profile and destination-model resources:
+## Contributing and support
 
-- [Inference profile prerequisites](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html)
-- [Using an inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html)
-- [SageMaker execution roles](https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-roles.html)
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Use the fork's issue tracker for Bedrock wrapper, SageMaker packaging, and fork-specific native changes. Report bugs that also occur in unmodified OpenCode to the [upstream OpenCode project](https://github.com/anomalyco/opencode/issues).
+
+Read [SUPPORT.md](SUPPORT.md) for the information to include in a support request. Security reports belong in the private channel described in [SECURITY.md](SECURITY.md).
+
+## Upstream and license
+
+This fork is based on [OpenCode](https://github.com/anomalyco/opencode). The imported revision is recorded in [UPSTREAM_REVISION](UPSTREAM_REVISION), and upstream history is retained. Root-level localized `README.*.md` files are imported OpenCode documentation; they do not describe this Bedrock specialization.
+
+OpenCode and this specialization are available under the [MIT License](LICENSE). See [NOTICE](NOTICE) for attribution.

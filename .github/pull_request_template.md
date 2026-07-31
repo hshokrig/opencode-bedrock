@@ -1,29 +1,19 @@
-### Issue for this PR
+## What changed
 
-Closes #
+Describe the behavior change and why it belongs in this fork.
 
-### Type of change
+## Risk
 
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Refactor / code improvement
-- [ ] Documentation
+Name the security, durability, compatibility, or upstream-sync risks. Write `Low` with a short reason when none are significant.
 
-### What does this PR do?
+## Verification
 
-Please provide a description of the issue, the changes you made to fix it, and why they work. It is expected that you understand why your changes work and if you do not understand why at least say as much so a maintainer knows how much to value the PR.
+List the exact tests and manual checks you ran. Do not include live AWS identifiers or credentials.
 
-**If you paste a large clearly AI generated description here your PR may be IGNORED or CLOSED!**
+## Checklist
 
-### How did you verify your code works?
-
-### Screenshots / recordings
-
-_If this is a UI change, please include a screenshot or recording._
-
-### Checklist
-
-- [ ] I have tested my changes locally
-- [ ] I have not included unrelated changes in this PR
-
-_If you do not follow this template your PR will be automatically rejected._
+- [ ] The PR is focused and uses a conventional commit-style title.
+- [ ] Default tests do not make live AWS calls.
+- [ ] Documentation matches any command, configuration, permission, or recovery change.
+- [ ] No AWS identifiers, credentials, service records, private endpoints, or repository secrets are included.
+- [ ] I considered whether the change belongs in upstream OpenCode instead.

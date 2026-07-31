@@ -1,66 +1,77 @@
 name: Bug report
-description: Report an issue that should be fixed (avoid pasting giant AI generated summaries or your issue may be closed/ignored)
+description: Report a reproducible problem in the Bedrock or SageMaker specialization
+title: "bug: "
+labels: [bug]
 body:
-  - type: textarea
-    id: description
+  - type: markdown
     attributes:
-      label: Description
-      description: Describe the bug you encountered
-      placeholder: What happened?
+      value: |
+        Remove AWS identifiers, credentials, service passwords, private endpoints, and repository secrets before submitting. Use the private security advisory form for a suspected vulnerability.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Build or offline installer
+        - Doctor or AWS verification
+        - Service start, stop, or recovery
+        - Basic agent task or approval
+        - Terminal chat
+        - Workspace sandbox
+        - Native OpenCode session transport
+        - Documentation
+        - Other fork-specific behavior
     validations:
       required: true
 
   - type: input
-    id: plugins
+    id: revision
     attributes:
-      label: Plugins
-      description: What plugins are you using?
+      label: Commit or artifact version
+      placeholder: 40-character commit or version from manifest.json
     validations:
-      required: false
+      required: true
 
-  - type: input
-    id: opencode-version
+  - type: textarea
+    id: environment
     attributes:
-      label: OpenCode version
-      description: What version of OpenCode are you using?
+      label: Environment
+      description: Linux distribution, architecture, Python version, and SageMaker application type if applicable.
     validations:
-      required: false
+      required: true
 
   - type: textarea
     id: reproduce
     attributes:
       label: Steps to reproduce
-      description: How can we reproduce this issue?
       placeholder: |
-        1.
-        2.
-        3.
+        1. Run ...
+        2. Enter ...
+        3. Observe ...
     validations:
-      required: false
+      required: true
 
   - type: textarea
-    id: screenshot-or-link
+    id: expected
     attributes:
-      label: Screenshot and/or share link
-      description: Run `/share` to get a share link, or attach a screenshot
-      placeholder: Paste link or drag and drop screenshot here
+      label: Expected behavior
     validations:
-      required: false
+      required: true
 
-  - type: input
-    id: os
+  - type: textarea
+    id: actual
     attributes:
-      label: Operating System
-      description: what OS are you using?
-      placeholder: e.g., macOS 26.0.1, Ubuntu 22.04, Windows 11
+      label: Actual behavior and redacted logs
     validations:
-      required: false
+      required: true
 
-  - type: input
-    id: terminal
+  - type: checkboxes
+    id: checks
     attributes:
-      label: Terminal
-      description: what terminal are you using?
-      placeholder: e.g., iTerm2, Ghostty, Alacritty, Windows Terminal
-    validations:
-      required: false
+      label: Checks
+      options:
+        - label: I removed AWS identifiers, credentials, passwords, private endpoints, and repository secrets.
+          required: true
+        - label: I checked whether the problem also occurs in unmodified OpenCode.
+          required: true
