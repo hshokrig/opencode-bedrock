@@ -17,4 +17,6 @@ if (process.versions.bun !== expectedBunVersion) {
   console.warn(`Warning: Bun version ${process.versions.bun} differs from expected ${expectedBunVersion}`);
 }
 '
-bun typecheck
+# Keep local pushes responsive on development laptops. CI still validates the
+# specialization packages independently on a clean runner.
+bun turbo typecheck --concurrency=2
