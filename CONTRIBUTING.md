@@ -36,7 +36,7 @@ Run native tests from their package directories. Do not run the repository-root 
 ```bash
 (cd packages/schema && bun test test/event.test.ts)
 (cd packages/server && bun test test/session-title-coordinator.test.ts)
-(cd packages/core && bun test --max-concurrency 1 test/database-migration.test.ts test/session-create.test.ts test/session-prompt.test.ts)
+(cd packages/core && bun test --max-concurrency 1 test/database-migration.test.ts test/session-create.test.ts test/session-prompt.test.ts test/session-run-coordinator.test.ts)
 (cd packages/opencode && bun test --timeout 10000 --max-concurrency 1 test/server/httpapi-session.test.ts test/server/httpapi-workspace.test.ts)
 ```
 

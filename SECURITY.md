@@ -18,6 +18,8 @@ If the issue also exists in unmodified OpenCode, report it to the [upstream Open
 
 Security fixes are applied to the current `main` branch. Older commits and locally modified artifacts are not maintained releases.
 
+The supported release is the Bedrock wrapper and the native OpenCode packages included in the offline archive. Imported upstream web, desktop, console, statistics, enterprise, Slack, and SDK publishing applications are retained for upstream synchronization but are not built, deployed, or supported by this fork. GitHub dependency alerts for those packages remain visible and must be reviewed before anyone deploys them separately.
+
 ## Fork threat model
 
 The Bedrock wrapper is intended to add a Linux workspace boundary around the native OpenCode service:

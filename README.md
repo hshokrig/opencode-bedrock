@@ -16,6 +16,8 @@ The local harness, native session transport, offline installer, and Linux x64 re
 
 The repository does not currently publish supported prebuilt binaries on GitHub Releases. Build the offline archive from the commit you reviewed, or use source directly on a connected development machine.
 
+The supported product is the Bedrock wrapper and the native packages included in its offline archive. The repository retains upstream web, desktop, console, statistics, enterprise, Slack, and SDK publishing code so upstream revisions can be imported cleanly, but this fork does not build or deploy those applications. Their dependency alerts remain visible for anyone who chooses to work on them.
+
 ## What it provides
 
 - A persistent background service for each Git repository
