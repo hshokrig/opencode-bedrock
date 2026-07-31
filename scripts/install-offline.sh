@@ -94,12 +94,43 @@ for path, expected in entries.items():
 print("inner checksums: OK")
 PY
 
-version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["artifact_version"])' "$root/manifest.json")"
+read -r version platform architecture python_minimum source_dirty < <(
+  python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(data["artifact_version"], data["platform"], data["architecture"], data["python_minimum"], str(data["source_dirty"]).lower())' "$root/manifest.json"
+)
+[[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]{0,95}$ ]] || {
+  echo "invalid artifact version: $version" >&2
+  exit 1
+}
+[[ "$source_dirty" == "false" || "${ALLOW_DIRTY_INSTALL:-0}" == "1" ]] || {
+  echo "refusing to install an artifact built from a dirty source tree" >&2
+  exit 1
+}
+python3 - "$python_minimum" <<'PY'
+import sys
+
+minimum = tuple(int(part) for part in sys.argv[1].split("."))
+if sys.version_info[: len(minimum)] < minimum:
+    raise SystemExit(f"Python {sys.argv[1]} or newer is required")
+PY
+machine="$(uname -m)"
+case "$machine" in
+  x86_64) target_architecture="x64" ;;
+  aarch64|arm64) target_architecture="arm64" ;;
+  *) echo "unsupported target architecture: $machine" >&2; exit 1 ;;
+esac
+[[ "$platform" == "linux" && "$architecture" == "$target_architecture" ]] || {
+  echo "artifact target mismatch: artifact=$platform/$architecture target=linux/$target_architecture" >&2
+  exit 1
+}
 mkdir -p "$prefix" "$HOME/.local/bin"
 prefix="$(realpath "$prefix")"
 destination="$prefix/$version"
 [[ ! -e "$destination" && ! -L "$destination" ]] || {
   echo "version is already installed: $destination" >&2
+  exit 1
+}
+[[ ! -e "$prefix/current" || -L "$prefix/current" ]] || {
+  echo "refusing to replace non-symlink: $prefix/current" >&2
   exit 1
 }
 
@@ -112,10 +143,14 @@ for name in opencode opencode-bedrock opencode-bedrock-verify-aws; do
 done
 
 mv "$root" "$destination"
+current="$prefix/current"
+temporary_current="$prefix/.current.$$"
+ln -s "$destination" "$temporary_current"
+mv -T "$temporary_current" "$current"
 for name in opencode opencode-bedrock opencode-bedrock-verify-aws; do
   link="$HOME/.local/bin/$name"
   temporary="$link.opencode-bedrock.$$"
-  ln -s "$destination/bin/$name" "$temporary"
+  ln -s "$current/bin/$name" "$temporary"
   mv -T "$temporary" "$link"
 done
 

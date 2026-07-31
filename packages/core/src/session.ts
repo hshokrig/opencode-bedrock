@@ -414,6 +414,7 @@ const layer = Layer.effect(
       }),
       recovery: Effect.fn("V2Session.recovery")(function* (input) {
         yield* result.get(input.sessionID)
+        yield* store.context(input.sessionID)
         return yield* SessionRecovery.inspect(db, input)
       }),
       prompt: Effect.fn("V2Session.prompt")((input) =>

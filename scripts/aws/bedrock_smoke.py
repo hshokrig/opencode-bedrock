@@ -26,7 +26,16 @@ def main() -> int:
         region_name=region,
         endpoint_url=os.environ.get("BEDROCK_CONTROL_ENDPOINT"),
     )
-    print(control.get_inference_profile(inferenceProfileIdentifier=profile))
+    profile_data = control.get_inference_profile(inferenceProfileIdentifier=profile)
+    print(profile_data)
+    if profile_data.get("status") != "ACTIVE":
+        raise RuntimeError("the selected inference profile is not ACTIVE")
+    models = profile_data.get("models")
+    arns = [item.get("modelArn") for item in models] if isinstance(models, list) else []
+    if not arns or not all(
+        isinstance(arn, str) and "anthropic.claude-opus" in arn for arn in arns
+    ):
+        raise RuntimeError("the selected inference profile must contain only Claude Opus models")
 
     runtime = boto3.client(
         "bedrock-runtime",

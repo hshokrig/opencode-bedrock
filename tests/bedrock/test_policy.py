@@ -60,6 +60,19 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(BedrockError):
             opencode_config("eu-north-1", "", None, "approval")
 
+    def test_runtime_endpoint_must_be_a_direct_https_aws_endpoint(self) -> None:
+        endpoint = "https://vpce-123.bedrock-runtime.eu-north-1.vpce.amazonaws.com"
+        config = opencode_config("eu-north-1", "profile-id", endpoint, "approval")
+        self.assertEqual(config["provider"]["amazon-bedrock"]["options"]["endpoint"], endpoint)
+        for invalid in (
+            "http://bedrock-runtime.eu-north-1.amazonaws.com",
+            "https://example.invalid",
+            "https://user@bedrock-runtime.eu-north-1.amazonaws.com",
+            "https://bedrock-runtime.eu-north-1.amazonaws.com?redirect=true",
+        ):
+            with self.subTest(endpoint=invalid), self.assertRaises(BedrockError):
+                opencode_config("eu-north-1", "profile-id", invalid, "approval")
+
     def test_workspace_agents_and_model_overrides_are_source_controlled(self) -> None:
         with TemporaryDirectory() as value:
             workspace = Path(value)

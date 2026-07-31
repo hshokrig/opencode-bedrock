@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .errors import BedrockError
 
@@ -38,6 +39,23 @@ def opencode_config(
     bash = {"*": "ask", **{pattern: "allow" for pattern in SAFE_BASH}}
     options: dict[str, Any] = {"region": region}
     if endpoint:
+        parsed = urlsplit(endpoint)
+        hostname = parsed.hostname or ""
+        if (
+            parsed.scheme != "https"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or not (
+                hostname.endswith(".amazonaws.com")
+                or hostname.endswith(".amazonaws.com.cn")
+            )
+        ):
+            raise BedrockError(
+                "Bedrock runtime endpoint must be an HTTPS amazonaws.com endpoint "
+                "without credentials, query, or fragment"
+            )
         options["endpoint"] = endpoint
 
     models = {

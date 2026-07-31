@@ -9,7 +9,7 @@ opencode-bedrock CLI
   ├── loopback HTTP client
   └── bubblewrap process boundary
         └── opencode serve
-              ├── durable sessions and pending permissions
+              ├── durable sessions and process-local pending permissions
               ├── plan, build, explore, implement, review, test
               ├── workspace tools
               └── Amazon Bedrock provider
@@ -33,5 +33,13 @@ The imported session UI also has a semantics-preserving string-escape fix so the
 Project registration is stored in `${XDG_CONFIG_HOME:-~/.config}/opencode-bedrock/projects.json`. Service records, generated passwords, logs, and task indexes live in `${XDG_STATE_HOME:-~/.local/state}/opencode-bedrock/services`.
 
 OpenCode receives service-specific XDG directories inside that service state directory. Sessions therefore remain available after a client disconnect or service restart on the same persistent filesystem.
+
+Task prompts use durable V2 admission with client-generated Session and message IDs. An uncertain
+HTTP response is retried only with those exact IDs. If the result remains unknown, the task index
+retains `delivery unknown` instead of treating the task as idle. Provider calls themselves are not
+blindly replayed after an uncertain attempt.
+
+Pending approval requests and active model/tool execution are process-local. Restarting a service
+does not resume them automatically.
 
 No service can survive destruction of its SageMaker application or compute instance. If the XDG state directory is on persistent storage, `start` recovers the stale PID record and OpenCode can reopen its session data after the application returns.

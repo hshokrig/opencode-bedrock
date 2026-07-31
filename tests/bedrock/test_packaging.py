@@ -20,6 +20,9 @@ class PackagingTests(unittest.TestCase):
             executable = fake_opencode(root)
             env = os.environ.copy()
             env["OPENCODE_BIN"] = str(executable)
+            env["ALLOW_DIRTY_BUILD"] = "1"
+            env["ALLOW_DIRTY_INSTALL"] = "1"
+            env["ALLOW_UNVERIFIED_OPENCODE_BIN"] = "1"
             env["HOME"] = str(root / "home")
             build = subprocess.run(
                 [str(repo / "scripts" / "build-offline.sh"), str(output)],
@@ -67,6 +70,24 @@ class PackagingTests(unittest.TestCase):
                 manifest["upstream_commit"],
                 "7565e03536d19e850f9996c407f9bf5e932b5f7a",
             )
+            source_revision = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            source_dirty = bool(
+                subprocess.run(
+                    ["git", "status", "--porcelain", "--untracked-files=normal"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            )
+            self.assertEqual(manifest["source_revision"], source_revision)
+            self.assertEqual(manifest["source_dirty"], source_dirty)
             second_output = root / "artifacts-second"
             second_build = subprocess.run(
                 [str(repo / "scripts" / "build-offline.sh"), str(second_output)],
@@ -96,7 +117,7 @@ class PackagingTests(unittest.TestCase):
                 timeout=30,
             )
             self.assertEqual(install.returncode, 0, install.stderr)
-            wrapper = prefix / "0.1.0" / "bin" / "opencode-bedrock"
+            wrapper = prefix / manifest["artifact_version"] / "bin" / "opencode-bedrock"
             version = subprocess.run(
                 [str(wrapper), "--version"],
                 check=False,
@@ -116,8 +137,15 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(chat_help.returncode, 0, chat_help.stderr)
             self.assertIn("--no-stream", chat_help.stdout)
             self.assertTrue(
-                (prefix / "0.1.0" / "share" / "policies" / "sagemaker-bedrock-iam.json").is_file()
+                (
+                    prefix
+                    / manifest["artifact_version"]
+                    / "share"
+                    / "policies"
+                    / "sagemaker-bedrock-iam.json"
+                ).is_file()
             )
+            self.assertEqual((prefix / "current").resolve(), prefix / manifest["artifact_version"])
             verifier = Path(env["HOME"]) / ".local" / "bin" / "opencode-bedrock-verify-aws"
             blocked = subprocess.run(
                 [str(verifier)],

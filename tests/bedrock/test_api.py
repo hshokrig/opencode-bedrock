@@ -159,10 +159,10 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "data": {
                         **protocol_session(
-                            purpose=body["purpose"],
                             agent=body["agent"],
                             model=body["model"],
                             location=body["location"],
+                            **({"purpose": body["purpose"]} if "purpose" in body else {}),
                         ),
                         "id": body["id"],
                     }
@@ -751,6 +751,16 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(prompted["delivery"], "queue")
         self.assertIs(prompted["resume"], True)
         self.assertEqual(prompted["prompt"], {"text": "hello"})
+
+    def test_v2_task_session_uses_exact_identity_and_agent(self) -> None:
+        session = self.client.create_task_session("ses_task", "build")
+        request = Handler.requests[-1][2]
+        self.assertEqual(session["id"], "ses_task")
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertEqual(request["id"], "ses_task")
+        self.assertEqual(request["agent"], "build")
+        self.assertNotIn("purpose", request)
 
     def test_event_stream_parses_crlf_comments_and_multiline_data(self) -> None:
         stream = self.client.events()

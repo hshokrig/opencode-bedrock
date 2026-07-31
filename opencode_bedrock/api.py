@@ -181,22 +181,37 @@ class Client:
         )
 
     def create_chat_session(self, session_id: str) -> dict[str, Any]:
-        self._segment(session_id)
-        response = self._request(
-            "POST",
-            "/api/session",
-            {
-                "id": session_id,
-                "purpose": "terminal-chat",
-                "agent": "chat",
-                "model": {"providerID": "amazon-bedrock", "id": "opus"},
-                "location": {"directory": str(self.workspace)},
-            },
+        return self._create_durable_session(
+            session_id,
+            agent="chat",
+            purpose="terminal-chat",
         )
+
+    def create_task_session(self, session_id: str, agent: str) -> dict[str, Any]:
+        return self._create_durable_session(session_id, agent=agent)
+
+    def _create_durable_session(
+        self,
+        session_id: str,
+        *,
+        agent: str,
+        purpose: str | None = None,
+    ) -> dict[str, Any]:
+        self._segment(session_id)
+        self._segment(agent)
+        payload = {
+            "id": session_id,
+            "agent": agent,
+            "model": {"providerID": "amazon-bedrock", "id": "opus"},
+            "location": {"directory": str(self.workspace)},
+        }
+        if purpose is not None:
+            payload["purpose"] = purpose
+        response = self._request("POST", "/api/session", payload)
         session = self._expect_data_object(response, "chat session creation")
         if session.get("id") != session_id:
             raise TransportError(
-                "OpenCode API did not confirm the requested chat session ID"
+                "OpenCode API did not confirm the requested durable session ID"
             )
         return self._expect_session(session, "chat session creation")
 

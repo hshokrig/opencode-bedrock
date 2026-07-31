@@ -90,15 +90,17 @@ Build on a networked Linux machine with the pinned Bun version:
 ```bash
 ALLOW_NETWORK_BOOTSTRAP=1 ./scripts/bootstrap.sh
 export PATH="$HOME/.bun/bin:$PATH"
-./scripts/build-offline.sh
+./scripts/build-offline.sh /tmp/opencode-bedrock-artifacts
 ```
 
-Copy the archive, its checksum, `install-opencode-bedrock.sh`, and the installer's checksum to SageMaker. Then run:
+The release archive name includes the specialization commit, for example
+`opencode-bedrock-0.1.0+f032a67bc4ac-linux-x64.tar.gz`. Copy that archive, its checksum,
+`install-opencode-bedrock.sh`, and the installer's checksum to SageMaker. Then run:
 
 ```bash
 sha256sum -c install-opencode-bedrock.sh.sha256
 ./install-opencode-bedrock.sh \
-  opencode-bedrock-0.1.0-linux-x64.tar.gz
+  opencode-bedrock-0.1.0+SOURCE_COMMIT-linux-x64.tar.gz
 
 export PATH="$HOME/.local/bin:$PATH"
 opencode-bedrock doctor
@@ -114,6 +116,7 @@ The artifact includes the OpenCode executable, this wrapper, the opt-in AWS veri
 - [Security model](docs/security-model.md)
 - [Offline installation](docs/offline-installation.md)
 - [SageMaker setup](docs/sagemaker-setup.md)
+- [Laptop and SageMaker release runbook](docs/deployment-runbook.md)
 - [AWS validation checklist](docs/aws-validation.md)
 - [Upstream sync procedure](docs/upstream-sync.md)
 

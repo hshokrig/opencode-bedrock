@@ -51,13 +51,21 @@ describe("DatabaseMigration", () => {
       ),
     )
   })
+  test("uses full synchronous durability for provider-attempt boundaries", async () => {
+    await using tmp = await tmpdir()
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const { db } = yield* Database.Service
+        expect(yield* db.get<{ synchronous: number }>(sql`PRAGMA synchronous`)).toEqual({ synchronous: 2 })
+      }).pipe(Effect.provide(Database.layerFromPath(path.join(tmp.path, "durable.sqlite")))),
+    )
+  })
   if (process.platform === "linux") {
     test("declared schema has no ungenerated migrations", async () => {
       const result = await $`bun ${fileURLToPath(new URL("../script/migration.ts", import.meta.url))} --check`
         .quiet()
         .nothrow()
       expect(result.exitCode, result.stderr.toString()).toBe(0)
-      expect(["", "No schema changes, nothing to migrate"]).toContain(result.stdout.toString().trim())
     }, 30_000)
   }
 

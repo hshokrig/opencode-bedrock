@@ -3,15 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from . import __version__
 from .chat import run as run_chat
 from .chat import sanitize
-from .errors import BedrockError
+from .errors import BedrockError, TransportError
 from .projects import Project, list_projects
 from .projects import add as add_project
 from .projects import get as get_project
@@ -32,6 +34,7 @@ from .service import (
 )
 from .tasks import add as add_task
 from .tasks import list_tasks
+from .tasks import update as update_task
 from .workspace import canonical_workspace
 
 
@@ -91,6 +94,8 @@ def parser() -> argparse.ArgumentParser:
     for name in ["stop", "restart", "attach", "logs", "task", "tasks"]:
         command = commands.add_parser(name)
         _selector(command)
+        if name == "restart":
+            command.add_argument("--opencode-bin")
         if name == "logs":
             command.add_argument("--follow", action="store_true")
         if name == "task":
@@ -221,7 +226,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 headless_policy=record.headless_policy,
                 foreground=False,
                 port=record.port,
-                opencode_value=record.opencode,
+                opencode_value=args.opencode_bin,
                 agent_models=record.agent_models,
             )
             print_record(next_record)
@@ -352,10 +357,35 @@ def logs(record: Record, follow: bool) -> int:
 def submit_task(record: Record, prompt: str, agent: str) -> int:
     if not prompt.strip():
         raise BedrockError("task prompt must not be empty")
-    session = client(record).create_session(prompt.strip()[:80])
-    session_id = session["id"]
-    task = add_task(record, session_id, prompt, agent)
-    client(record).prompt_async(session_id, prompt, agent)
+    session_id = f"ses_{uuid.uuid4().hex}"
+    message_id = f"msg_{uuid.uuid4().hex}"
+    task = add_task(
+        record,
+        session_id,
+        prompt,
+        agent,
+        message_id=message_id,
+        status="submitting",
+    )
+    api = client(record)
+    try:
+        try:
+            api.create_task_session(session_id, agent)
+        except TransportError:
+            api.create_task_session(session_id, agent)
+        try:
+            api.prompt_chat(session_id, message_id, prompt)
+        except TransportError:
+            api.prompt_chat(session_id, message_id, prompt)
+    except TransportError as error:
+        update_task(record, task["id"], "delivery unknown")
+        raise TransportError(
+            f"task delivery outcome is unknown for {task['id']}; inspect it with the tasks command"
+        ) from error
+    except BedrockError:
+        update_task(record, task["id"], "failed")
+        raise
+    update_task(record, task["id"], "submitted")
     print(f"submitted {task['id']} to {record.project or record.workspace}")
     print(f"session: {session_id}")
     return 0
@@ -401,6 +431,9 @@ def approval_command(args: argparse.Namespace) -> int:
 
 def doctor_command(args: argparse.Namespace) -> int:
     failures = 0
+    git = shutil.which("git")
+    print(f"git: {git or 'not found'}")
+    failures += int(git is None)
     try:
         opencode = find_opencode(args.opencode_bin)
         result = subprocess.run(

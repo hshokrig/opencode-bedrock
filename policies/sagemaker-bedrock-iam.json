@@ -5,8 +5,7 @@
       "Sid": "InspectSelectedInferenceProfile",
       "Effect": "Allow",
       "Action": [
-        "bedrock:GetInferenceProfile",
-        "bedrock:ListInferenceProfiles"
+        "bedrock:GetInferenceProfile"
       ],
       "Resource": [
         "PROFILE_ARN"

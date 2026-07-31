@@ -34,10 +34,17 @@ opencode-bedrock approval always --project NAME REQUEST_ID
 opencode-bedrock approval reject --project NAME REQUEST_ID --message "Try a read-only check."
 ```
 
-`approve` applies once. `always` applies for the current OpenCode session. A rejection message is returned to the agent as corrective feedback.
+`approve` applies once. `always` saves the matching permission rule for every task in this
+workspace service until that service exits; it is not limited to the requesting Session. Use it
+only when that broader scope is intended. A rejection message is returned to the agent as
+corrective feedback.
 
 The default `approval` policy asks before edits and non-read-only shell commands. `workspace-write` allows file edits without a client but still asks for shell commands outside the small read-only allowlist.
 
 Approval replies sent through the wrapper are appended to the service log with the request ID and action. OpenCode keeps the corresponding permission request and tool result in the session.
+
+Pending approval requests live in the running process. A service crash or restart clears them;
+durable Session history remains, but an interrupted provider/tool attempt is not automatically
+replayed. Inspect the task and logs after restart and submit a new task when continuation is needed.
 
 All agents use the primary inference profile unless `start` receives an override such as `--agent-model review=PROFILE`. Valid agent names are `plan`, `build`, `explore`, `implement`, `review`, and `test`. Overrides are stored in the private service record and are redacted from `status`.

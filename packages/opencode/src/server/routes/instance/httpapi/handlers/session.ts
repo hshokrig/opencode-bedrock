@@ -242,7 +242,12 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     const abort = Effect.fn("SessionHttpApi.abort")(function* (ctx: { params: { sessionID: SessionID } }) {
-      yield* requireMutableSession(ctx.params.sessionID)
+      const current = yield* Effect.option(session.get(ctx.params.sessionID))
+      if (Option.isSome(current) && current.value.purpose === "terminal-chat")
+        return yield* new ServiceUnavailableError({
+          message: "Legacy session mutation routes are unavailable for terminal chats",
+          service: "session.legacyMutation",
+        })
       yield* promptSvc.cancel(ctx.params.sessionID)
       return true
     })

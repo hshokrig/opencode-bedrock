@@ -34,14 +34,19 @@ def canonical_workspace(value: str, allow_non_git: bool = False) -> Path:
 
 
 def is_git_repository(path: Path) -> bool:
-    result = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        timeout=5,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+    except FileNotFoundError as error:
+        raise BedrockError("git is required to inspect project workspaces") from error
+    except subprocess.TimeoutExpired as error:
+        raise BedrockError(f"git timed out while inspecting workspace: {path}") from error
     return result.returncode == 0 and result.stdout.strip() == "true"
 
 

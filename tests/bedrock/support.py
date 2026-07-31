@@ -39,6 +39,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/global/health"):
             return self.send(200, {"healthy": True, "version": "fake"})
+        if self.path.startswith("/api/session/active"):
+            return self.send(200, {"data": {}})
         if self.path.startswith("/session/status"):
             return self.send(200, {})
         if self.path.startswith("/permission"):

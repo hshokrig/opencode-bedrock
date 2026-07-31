@@ -263,6 +263,7 @@ describe("workspace HttpApi", () => {
         }),
       })
       const terminal = (yield* created.json) as { data: { id: string } }
+      calls = 0
 
       const warped = yield* request(WorkspacePaths.warp, dir, {
         method: "POST",

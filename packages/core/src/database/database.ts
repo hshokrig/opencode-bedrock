@@ -25,7 +25,9 @@ const layer = Layer.effect(
     const db = yield* makeDatabase
 
     yield* db.run("PRAGMA journal_mode = WAL")
-    yield* db.run("PRAGMA synchronous = NORMAL")
+    // Provider-attempt events are the replay boundary after sudden power loss.
+    // FULL is required so a committed attempt cannot disappear while its Bedrock call survives.
+    yield* db.run("PRAGMA synchronous = FULL")
     yield* db.run("PRAGMA busy_timeout = 5000")
     yield* db.run("PRAGMA cache_size = -64000")
     yield* db.run("PRAGMA foreign_keys = ON")

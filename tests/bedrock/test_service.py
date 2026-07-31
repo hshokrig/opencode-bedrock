@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from opencode_bedrock.errors import BedrockError
+from opencode_bedrock.errors import BedrockError, JSONWriteError
 from opencode_bedrock.service import (
     Record,
     alive,
@@ -142,6 +144,38 @@ class ServiceTests(unittest.TestCase):
                 )
             )
             self.assertEqual(states, [])
+
+    def test_record_write_failure_terminates_spawned_service(self) -> None:
+        with isolated_environment() as root:
+            workspace = git_repository(root)
+            executable = fake_opencode(root)
+            processes: list[subprocess.Popen] = []
+            popen = subprocess.Popen
+
+            def spawn(*args: object, **kwargs: object) -> subprocess.Popen:
+                process = popen(*args, **kwargs)
+                processes.append(process)
+                return process
+
+            failure = JSONWriteError("service.json", OSError("disk failure"), committed=False)
+            with (
+                patch("opencode_bedrock.service.subprocess.Popen", side_effect=spawn),
+                patch("opencode_bedrock.service.write_json", side_effect=failure),
+                self.assertRaises(JSONWriteError),
+            ):
+                start(
+                    workspace,
+                    "sample",
+                    "eu-north-1",
+                    "test-profile",
+                    None,
+                    "approval",
+                    False,
+                    None,
+                    str(executable),
+                )
+            self.assertEqual(len(processes), 1)
+            self.assertIsNotNone(processes[0].poll())
 
 
 if __name__ == "__main__":

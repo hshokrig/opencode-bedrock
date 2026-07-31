@@ -24,6 +24,13 @@ Standard input is closed for the service and for OpenCode shell tools. A backgro
 
 Network access is not namespaced because OpenCode must reach Bedrock and may need an AWS credential endpoint. A user-approved shell command can use the network. Keep shell approvals narrow and use VPC egress controls where the workload requires stronger enforcement.
 
+Custom Bedrock runtime endpoints must use HTTPS and an `amazonaws.com` or `amazonaws.com.cn`
+hostname. Native model HTTP requests do not follow redirects, preventing a redirect from forwarding
+the signed prompt body or temporary AWS session token to another origin.
+
+An `always` approval is shared by all tasks in the workspace service until it exits. Prefer a
+one-time approval unless every current and future task in that service should receive the rule.
+
 The mount boundary hides host credential files, but it cannot hide a secret stored inside the selected workspace. File tools deny common secret names. An approved shell command can still read any file mounted in that workspace and can inherit AWS environment credentials. Review commands with that in mind.
 
 `workspace-write` permits model-directed file changes without an attached client. Git history remains the practical recovery path. Do not enable it for an untrusted repository or a workspace containing data that cannot be restored.

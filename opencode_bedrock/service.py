@@ -100,25 +100,39 @@ def start(
         except OSError as error:
             log_handle.close()
             raise BedrockError(f"could not start OpenCode: {error}") from error
-        record = Record(
-            key=key,
-            project=project,
-            workspace=str(workspace),
-            pid=process.pid,
-            process_start=_process_start(process.pid),
-            port=selected_port,
-            password=password,
-            started_at=time.time(),
-            headless_policy=headless_policy,
-            region=region,
-            inference_profile=inference_profile,
-            agent_models=agent_models or {},
-            endpoint=endpoint,
-            opencode=str(opencode),
-            log=str(log_path),
-        )
-        write_json(directory / "service.json", asdict(record))
-        _children[record.pid] = process
+        try:
+            record = Record(
+                key=key,
+                project=project,
+                workspace=str(workspace),
+                pid=process.pid,
+                process_start=_process_start(process.pid),
+                port=selected_port,
+                password=password,
+                started_at=time.time(),
+                headless_policy=headless_policy,
+                region=region,
+                inference_profile=inference_profile,
+                agent_models=agent_models or {},
+                endpoint=endpoint,
+                opencode=str(opencode),
+                log=str(log_path),
+            )
+            write_json(directory / "service.json", asdict(record))
+            _children[record.pid] = process
+        except Exception:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            (directory / "service.json").unlink(missing_ok=True)
+            log_handle.close()
+            raise
 
     if foreground:
         print(f"workspace: {workspace}")

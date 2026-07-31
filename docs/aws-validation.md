@@ -60,14 +60,29 @@ opencode-bedrock logs --workspace /absolute/path/to/sample-repo --follow
 
 Stop following after the response arrives with `Ctrl-C`; the service continues.
 
-## 6. Read inside the sample repository
+Confirm that the profile metadata from step 2 lists the intended Claude Opus model and that its
+context/output limits match the configured 200,000/20,000-token policy. A different Claude family
+or limit requires a reviewed configuration change before release.
+
+## 6. Terminal chat through the native V2 transport
+
+```bash
+opencode-bedrock chat --workspace /absolute/path/to/sample-repo --new --no-stream
+```
+
+Type `Reply with exactly: chat-ok`, verify the response, then `/quit`. Run it again without
+`--no-stream`, verify streamed output and the generated title in `/sessions`, quit, restart the
+workspace service, and confirm that the same chat resumes. This exercises the transport, durable
+admission, title call, streaming, and persistent Session database that Boto3 alone does not cover.
+
+## 7. Read inside the sample repository
 
 ```bash
 opencode-bedrock task --workspace /absolute/path/to/sample-repo \
   "Read README.md and report its first heading. Do not edit files."
 ```
 
-## 7. Reject an out-of-workspace read
+## 8. Reject an out-of-workspace read
 
 ```bash
 opencode-bedrock task --workspace /absolute/path/to/sample-repo \
@@ -76,7 +91,7 @@ opencode-bedrock task --workspace /absolute/path/to/sample-repo \
 
 The task must report a denial. Treat any file content as a security failure and stop the service.
 
-## 8. Run a safe command in the repository
+## 9. Run a safe command in the repository
 
 ```bash
 opencode-bedrock task --workspace /absolute/path/to/sample-repo \
@@ -85,7 +100,7 @@ opencode-bedrock task --workspace /absolute/path/to/sample-repo \
 
 `pwd` must equal the selected repository path.
 
-## 9. Start, detach, inspect, attach, and stop
+## 10. Start, detach, inspect, attach, and stop
 
 ```bash
 opencode-bedrock start --project my-project
@@ -96,7 +111,7 @@ opencode-bedrock status
 opencode-bedrock stop --project my-project
 ```
 
-## 10. Terminal-disconnect persistence
+## 11. Terminal-disconnect persistence
 
 Start the service, note its PID, and close the SageMaker terminal. Open a new terminal in the same running application:
 
@@ -107,7 +122,7 @@ opencode-bedrock attach --project my-project
 
 The PID should still be running and the earlier session should be available.
 
-## 11. SageMaker application restart
+## 12. SageMaker application restart
 
 Start a service and stop the SageMaker application from the console. Start the application again on the same persistent home volume:
 
